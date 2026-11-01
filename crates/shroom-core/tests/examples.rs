@@ -108,6 +108,20 @@ fn raw_to_linear_dng_roundtrip() {
         }
     }
 
+    // XMP (labels, lens) is carried over with a new document identity.
+    let xmp = |root: &rawler::formats::tiff::IFD| match root.get_entry(700u16).map(|e| &e.value) {
+        Some(rawler::formats::tiff::Value::Byte(b) | rawler::formats::tiff::Value::Undefined(b)) => {
+            String::from_utf8_lossy(b).into_owned()
+        }
+        _ => String::new(),
+    };
+    let (src_xmp, out_xmp) = (xmp(&src_root), xmp(&out_root));
+    assert!(src_xmp.contains("aux:Lens="), "source has no lens in XMP");
+    let lens = src_xmp.lines().find(|l| l.contains("aux:Lens=")).unwrap();
+    assert!(out_xmp.contains(lens), "{out_xmp}");
+    let doc_id = src_xmp.lines().find(|l| l.contains("xmpMM:DocumentID=")).unwrap();
+    assert!(!out_xmp.contains(doc_id));
+
     let back_info = io::read_frame_info(&out).unwrap();
     assert_eq!(back_info.camera, info.camera);
     assert_eq!(back_info.capture_time, info.capture_time);

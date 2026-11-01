@@ -20,6 +20,9 @@ const KEPT_RAW_TAGS: [u16; 2] = [
     51041, // NoiseProfile
 ];
 
+/// TIFF tag holding the XMP packet.
+const XMP_TAG: u16 = 700;
+
 /// Root IFD tags describing camera colour calibration and the embedded camera profile.
 /// They are copied verbatim so raw converters render the result exactly like the source;
 /// in particular the profile's hue/sat and look tables only give the intended colours
@@ -65,6 +68,8 @@ pub struct DngTemplate {
     pub(super) metadata: RawMetadata,
     pub(super) root_tags: Vec<(u16, Value)>,
     pub(super) raw_tags: Vec<(u16, Value)>,
+    /// XMP packet of the source (labels, lens, develop settings), if any.
+    pub(super) xmp: Option<String>,
 }
 
 impl std::fmt::Debug for DngTemplate {
@@ -194,12 +199,20 @@ fn decode_full(path: &Path) -> Result<(RawImage, DngTemplate)> {
         }
     }
     let raw_tags = ifd_tags(WellKnownIFD::VirtualDngRawTags, &|t| KEPT_RAW_TAGS.contains(&t))?;
+    // rawler's DNG decoder doesn't implement `xpacket`, so read the XMP tag directly.
+    let xmp = ifd_tags(WellKnownIFD::Root, &|t| t == XMP_TAG)?
+        .into_iter()
+        .find_map(|(_, value)| match value {
+            Value::Byte(bytes) | Value::Undefined(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+            _ => None,
+        });
     let data = std::mem::replace(&mut raw.data, RawImageData::Integer(Vec::new()));
     let template = DngTemplate {
         raw: raw.clone(),
         metadata,
         root_tags,
         raw_tags,
+        xmp,
     };
     raw.data = data;
     Ok((raw, template))
@@ -364,6 +377,7 @@ pub(crate) mod tests {
             metadata: RawMetadata::default(),
             root_tags: Vec::new(),
             raw_tags: Vec::new(),
+            xmp: None,
         }
     }
 

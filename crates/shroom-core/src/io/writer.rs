@@ -97,6 +97,10 @@ fn write_to(path: &Path, image: &RgbImage, template: &DngTemplate, software: &st
     // The source's own colour tags take precedence: rawler rounds matrices when writing.
     dng.root_ifd_mut()
         .copy_with_override(template.root_tags.iter().map(|(t, v)| (t, v)));
+    if let Some(xmp) = &template.xmp {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        dng.xpacket(super::xmp::for_result(xmp, &uuid)).map_err(enc_err)?;
+    }
     dng.root_ifd_mut().add_tag(TiffCommonTag::Software, software);
     dng.root_ifd_mut().add_tag(
         ExifTag::ModifyDate,
@@ -180,6 +184,21 @@ mod tests {
             .unwrap();
         assert_eq!(root.get_entry(FORWARD_MATRIX_1).map(|e| &e.value), Some(&forward));
         assert_eq!(root.get_entry(COLOR_MATRIX_2).map(|e| &e.value), Some(&color));
+    }
+
+    #[test]
+    fn xmp_is_written_without_crop() {
+        let mut template = synthetic_template();
+        template.xmp = Some(
+            r#"<x:xmpmeta><rdf:Description xmp:Label="Blau" crs:HasCrop="True" crs:CropTop="0.2"/></x:xmpmeta>"#.into(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xmp.dng");
+        write_linear_dng(&path, &gradient(4, 4), &template, "test").unwrap();
+
+        let back = load_linear(&path).unwrap().template.xmp.expect("XMP written");
+        assert!(back.contains(r#"xmp:Label="Blau""#), "{back}");
+        assert!(!back.contains("Crop"), "{back}");
     }
 
     #[test]
