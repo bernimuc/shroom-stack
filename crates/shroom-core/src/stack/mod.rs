@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::align::{AlignedFrames, Alignment, align_frames};
 use crate::error::{Error, Result};
 use crate::image::{Plane, RgbImage};
 
@@ -67,6 +68,8 @@ impl FrameSource for FileFrames {
 /// Which part of the processing is running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
+    /// Estimating frame alignment.
+    Aligning,
     /// Measuring focus / decomposing frames.
     Analysing,
     /// Assembling the output from the frames.
@@ -94,7 +97,7 @@ impl CancelToken {
         self.0.load(Ordering::Relaxed)
     }
 
-    fn check(&self) -> Result<()> {
+    pub(crate) fn check(&self) -> Result<()> {
         if self.is_cancelled() {
             Err(Error::Cancelled)
         } else {
@@ -103,32 +106,60 @@ impl CancelToken {
     }
 }
 
+/// Everything that determines how a stack is processed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StackSettings {
+    pub method: Method,
+    /// Align frames before stacking (recommended; compensates focus breathing).
+    pub align: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct StackResult {
     pub image: RgbImage,
     /// Per pixel, the (fractional) index of the frame the output was taken from.
     pub depth_map: Plane,
+    /// Frame alignment, if enabled. The image covers `alignment.crop`.
+    pub alignment: Option<Alignment>,
 }
 
 /// Stacks all frames of `source`.
 pub fn stack(
     source: &dyn FrameSource,
-    method: Method,
+    settings: &StackSettings,
     progress: &dyn Fn(Progress),
     cancel: &CancelToken,
 ) -> Result<StackResult> {
     if source.len() < 2 {
         return Err(Error::InvalidInput("at least two frames are needed".into()));
     }
+    let alignment = if settings.align {
+        Some(align_frames(source, progress, cancel)?)
+    } else {
+        None
+    };
+    let aligned;
+    let frames: &dyn FrameSource = match &alignment {
+        Some(alignment) => {
+            aligned = AlignedFrames { source, alignment };
+            &aligned
+        }
+        None => source,
+    };
     let ctx = Context {
-        source,
+        source: frames,
         progress,
         cancel,
     };
-    match method {
-        Method::DepthMap { radius, smoothing } => depthmap::stack(&ctx, radius as usize, smoothing as f32),
-        Method::Pyramid { smoothing } => pyramid::stack(&ctx, smoothing as usize),
-    }
+    let (image, depth_map) = match settings.method {
+        Method::DepthMap { radius, smoothing } => depthmap::stack(&ctx, radius as usize, smoothing as f32)?,
+        Method::Pyramid { smoothing } => pyramid::stack(&ctx, smoothing as usize)?,
+    };
+    Ok(StackResult {
+        image,
+        depth_map,
+        alignment,
+    })
 }
 
 struct Context<'a> {
@@ -212,10 +243,20 @@ pub(crate) mod tests {
         sum / n as f32
     }
 
+    fn unaligned(method: Method) -> StackSettings {
+        StackSettings { method, align: false }
+    }
+
     #[test]
     fn rejects_single_frame() {
         let frames = MemFrames(vec![RgbImage::new(8, 8)]);
-        let err = stack(&frames, Method::DEFAULT_PYRAMID, &|_| {}, &CancelToken::default()).unwrap_err();
+        let err = stack(
+            &frames,
+            &unaligned(Method::DEFAULT_PYRAMID),
+            &|_| {},
+            &CancelToken::default(),
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
     }
 
@@ -223,7 +264,7 @@ pub(crate) mod tests {
     fn rejects_mismatched_sizes() {
         let frames = MemFrames(vec![RgbImage::new(16, 16), RgbImage::new(16, 15)]);
         for method in [Method::DEFAULT_DEPTH_MAP, Method::DEFAULT_PYRAMID] {
-            let err = stack(&frames, method, &|_| {}, &CancelToken::default()).unwrap_err();
+            let err = stack(&frames, &unaligned(method), &|_| {}, &CancelToken::default()).unwrap_err();
             assert!(matches!(err, Error::InvalidInput(_)), "{method:?}: {err}");
         }
     }
@@ -239,7 +280,7 @@ pub(crate) mod tests {
         };
         for method in [Method::DEFAULT_DEPTH_MAP, Method::DEFAULT_PYRAMID] {
             cancel.0.store(false, Ordering::Relaxed);
-            let err = stack(&frames, method, &progress, &cancel).unwrap_err();
+            let err = stack(&frames, &unaligned(method), &progress, &cancel).unwrap_err();
             assert!(matches!(err, Error::Cancelled), "{method:?}");
         }
     }
@@ -251,7 +292,7 @@ pub(crate) mod tests {
             let seen = std::sync::Mutex::new(Vec::new());
             stack(
                 &frames,
-                method,
+                &unaligned(method),
                 &|p| seen.lock().unwrap().push(p),
                 &CancelToken::default(),
             )
@@ -271,7 +312,7 @@ pub(crate) mod tests {
         let (w, h, n) = (192, 48, 3);
         let (sharp, frames) = banded_stack(w, h, n);
         for method in [Method::DEFAULT_DEPTH_MAP, Method::DEFAULT_PYRAMID] {
-            let result = stack(&frames, method, &|_| {}, &CancelToken::default()).unwrap();
+            let result = stack(&frames, &unaligned(method), &|_| {}, &CancelToken::default()).unwrap();
             for i in 0..n {
                 let (x0, x1) = (i * w / n, (i + 1) * w / n);
                 let stacked = band_error(&result.image, &sharp, x0, x1, 12);

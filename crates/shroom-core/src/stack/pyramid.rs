@@ -7,7 +7,7 @@
 
 use rayon::prelude::*;
 
-use super::{Context, StackResult, Stage};
+use super::{Context, Stage};
 use crate::error::Result;
 use crate::filter::{box_blur, expand, merge_channels, reduce, split_channels};
 use crate::image::{Plane, RgbImage};
@@ -21,7 +21,7 @@ struct Pyramid {
     base: [Plane; 3],
 }
 
-pub(super) fn stack(ctx: &Context, smoothing: usize) -> Result<StackResult> {
+pub(super) fn stack(ctx: &Context, smoothing: usize) -> Result<(RgbImage, Plane)> {
     let n = ctx.source.len();
     let radius = (smoothing / 2).max(1);
 
@@ -79,10 +79,7 @@ pub(super) fn stack(ctx: &Context, smoothing: usize) -> Result<StackResult> {
     });
     let mut image = collapse(fused);
     image.data_mut().par_iter_mut().for_each(|v| *v = v.max(0.0));
-    Ok(StackResult {
-        image,
-        depth_map: source,
-    })
+    Ok((image, source))
 }
 
 fn level_count(w: usize, h: usize) -> usize {
@@ -190,7 +187,7 @@ mod tests {
             progress: &|_| {},
             cancel: &Default::default(),
         };
-        let out = stack(&ctx, 4).unwrap().image;
+        let out = stack(&ctx, 4).unwrap().0;
         let err = img
             .data()
             .iter()

@@ -10,6 +10,8 @@ pub enum Error {
     Unsupported { path: PathBuf, message: String },
     #[error("{0}")]
     InvalidInput(String),
+    #[error("alignment failed: {0}")]
+    Alignment(String),
     #[error("cancelled")]
     Cancelled,
     #[error("cannot write {path}: {message}")]

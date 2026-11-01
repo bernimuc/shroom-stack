@@ -5,10 +5,10 @@ use std::time::Instant;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use shroom_core::DisplayImage;
 use shroom_core::io::{self, FrameInfo};
 use shroom_core::render::{render_depth_map, render_display};
-use shroom_core::stack::{self, CancelToken, FileFrames, Method, Stage};
+use shroom_core::stack::{self, CancelToken, FileFrames, Method, StackSettings, Stage};
+use shroom_core::{DisplayImage, Rect};
 
 #[derive(Parser)]
 #[command(name = "shroom", version, about = "Shroom Stack focus stacking (command line)")]
@@ -41,6 +41,9 @@ enum Command {
         radius: u32,
         #[arg(long, default_value_t = 4)]
         smoothing: u32,
+        /// Skip frame alignment.
+        #[arg(long)]
+        no_align: bool,
         /// Also write a JPEG preview of the result.
         #[arg(long)]
         preview: Option<PathBuf>,
@@ -55,6 +58,9 @@ enum Command {
         /// Longest side of the output in pixels.
         #[arg(long, default_value_t = 2048)]
         size: usize,
+        /// Only render this region at 1:1, as `x,y,width,height`.
+        #[arg(long, value_parser = parse_rect)]
+        crop: Option<Rect>,
     },
 }
 
@@ -62,13 +68,19 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Info { files } => info(&files),
         Command::Convert { input, output } => convert(&input, &output),
-        Command::Preview { input, output, size } => preview(&input, &output, size),
+        Command::Preview {
+            input,
+            output,
+            size,
+            crop,
+        } => preview(&input, &output, size, crop),
         Command::Stack {
             files,
             output,
             method,
             radius,
             smoothing,
+            no_align,
             preview,
             depth_map,
         } => {
@@ -76,7 +88,11 @@ fn main() -> anyhow::Result<()> {
                 MethodArg::DepthMap => Method::DepthMap { radius, smoothing },
                 MethodArg::Pyramid => Method::Pyramid { smoothing },
             };
-            stack_files(&files, &output, method, preview.as_deref(), depth_map.as_deref())
+            let settings = StackSettings {
+                method,
+                align: !no_align,
+            };
+            stack_files(&files, &output, &settings, preview.as_deref(), depth_map.as_deref())
         }
     }
 }
@@ -120,18 +136,19 @@ fn convert(input: &Path, output: &Path) -> anyhow::Result<()> {
 fn stack_files(
     files: &[PathBuf],
     output: &Path,
-    method: Method,
+    settings: &StackSettings,
     preview: Option<&Path>,
     depth_map: Option<&Path>,
 ) -> anyhow::Result<()> {
     let mut frames: Vec<FrameInfo> = files.iter().map(|p| io::read_frame_info(p)).collect::<Result<_, _>>()?;
     io::sort_frames(&mut frames);
     let paths: Vec<PathBuf> = frames.into_iter().map(|f| f.path).collect();
-    eprintln!("stacking {} frames with {method:?}", paths.len());
+    eprintln!("stacking {} frames with {settings:?}", paths.len());
 
     let t = Instant::now();
     let progress = |p: stack::Progress| {
         let stage = match p.stage {
+            Stage::Aligning => "aligning",
             Stage::Analysing => "analysing",
             Stage::Compositing => "compositing",
         };
@@ -139,11 +156,22 @@ fn stack_files(
     };
     let result = stack::stack(
         &FileFrames { paths: paths.clone() },
-        method,
+        settings,
         &progress,
         &CancelToken::default(),
     )?;
     eprintln!("\nstacked in {:.2?}", t.elapsed());
+    if let Some(alignment) = &result.alignment {
+        let last = alignment.transforms.last().unwrap();
+        eprintln!(
+            "aligned: scale first→last {:.4}, output {}×{} at ({}, {})",
+            last.scale_factor(),
+            alignment.crop.width,
+            alignment.crop.height,
+            alignment.crop.x,
+            alignment.crop.y
+        );
+    }
 
     let first = io::load_linear(&paths[0])?;
     io::write_linear_dng(
@@ -171,7 +199,22 @@ fn save_jpeg(img: &DisplayImage, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn preview(input: &Path, output: &Path, size: usize) -> anyhow::Result<()> {
+fn parse_rect(s: &str) -> Result<Rect, String> {
+    let v: Vec<usize> = s
+        .split(',')
+        .map(|p| p.trim().parse().map_err(|_| format!("invalid number {p:?}")))
+        .collect::<Result<_, _>>()?;
+    let [x, y, width, height] = v[..] else {
+        return Err("expected x,y,width,height".into());
+    };
+    Ok(Rect::new(x, y, width, height))
+}
+
+fn preview(input: &Path, output: &Path, size: usize, crop: Option<Rect>) -> anyhow::Result<()> {
     let frame = io::load_linear(input).with_context(|| format!("loading {}", input.display()))?;
-    save_jpeg(&render_display(&frame.image, &frame.color, Some(size)), output)
+    let (image, size) = match crop {
+        Some(rect) => (frame.image.crop(rect), None),
+        None => (frame.image, Some(size)),
+    };
+    save_jpeg(&render_display(&image, &frame.color, size), output)
 }

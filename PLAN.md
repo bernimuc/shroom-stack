@@ -141,7 +141,7 @@ Each milestone ends with tests green and something runnable.
 | 0 ✅ | Setup | rustup toolchain, cargo workspace, CI‑style `cargo test`/`clippy`/`fmt`, `.gitignore` |
 | 1 ✅ | DNG I/O | read metadata + embedded preview + CFA data; demosaic; write Linear DNG; round‑trip tests; open result in Lightroom (pending manual check) |
 | 2 ✅ | CLI stacker (CPU) | `shroom-cli` for fast iteration: both methods on CPU, compare visually with Helicon outputs |
-| 3 | Alignment | transform estimation, warp, crop; synthetic tests (known transform) |
+| 3 ✅ | Alignment | transform estimation, warp, crop; synthetic tests (known transform) |
 | 4 | GPU | wgpu compute for demosaic, warp, focus measure, pyramid; CPU vs GPU equality tests; benchmarks on Stack 1 (34 × 47 MP) |
 | 5 | UI shell + Preparation | egui app, file list w/ thumbnails, preview widget with zoom/pan, toolbar, preflight check |
 | 6 | Processing workspace | worker thread, progress, live split view, cancel |
@@ -193,3 +193,20 @@ Notes from milestone 2:
 * Without alignment the example stacks show strong radial ghosting: focus breathing
   scales the image by ~2–3 % across the stack. Alignment (milestone 3) is required
   before results can be compared with Helicon.
+
+Notes from milestone 3:
+
+* Alignment: similarity transform (scale, rotation, shift) per neighbouring frame pair,
+  Gauss–Newton on a coarse-to-fine luminance pyramid (working size 2048 px), chained
+  to the first frame's geometry; bicubic (Catmull–Rom) warping; output cropped to the
+  common area. Unit tests recover known transforms to < 0.1 px.
+* Focus breathing in the examples: field of view grows 2–17 % from first to last frame
+  (Stack 1: 17 %). The first frame is the most magnified, so the crop is ~1 px and our
+  geometry matches Helicon's output.
+* Pyramid results are visually on par with Helicon "C" on all four stacks.
+* Depth map needed a noise-robust focus measure (Laplacian of Gaussian, σ = 1.5): the
+  plain Laplacian mostly measured sensor noise and always picked the un-resampled
+  reference frame. Confidence = how much the best frame stands out from the mean.
+  Still visibly softer than Helicon "B" in smooth, low-texture areas → tuning task.
+* Timing on M5 CPU: 13–28 s per stack (frames are decoded 2–3×); GPU + frame cache
+  are the next speed levers.
