@@ -228,3 +228,15 @@ fn cr3_lens_and_levels() {
     );
     println!("camera hints {:?}", raw.camera.hints);
 }
+
+#[test]
+#[ignore]
+fn profile_hot_pixels() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Stack 1/1Z4A4075.dng");
+    if !path.exists() {
+        return;
+    }
+    let mut m = decode_raw(&path).unwrap().mosaic;
+    time("remove_hot_pixels", || crate::raw::remove_hot_pixels(&mut m));
+    time("read_frame_info", || crate::io::read_frame_info(&path).unwrap());
+}

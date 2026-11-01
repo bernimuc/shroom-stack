@@ -59,8 +59,9 @@ Lightroom plugin (to verify: whether the SDK can rotate photos in the catalogue)
 Canon EOS R5 and R7, learned automatically from any Lightroom raw DNG (stored in the
 user's configuration directory); original lens name and Canon lens ID in EXIF/XMP;
 previews downscaled to 1024 px. Stack 5 (CR3) gives the same result as Stack 1 (DNG).
-Follow-up: stacking from CR3 is slower (decoding; depth map reads each frame three
-times) – a decoded-frame cache would help now.
+Decoded-frame cache (16-bit, up to a quarter of the installed memory) for slow-to-decode
+formats with three passes (depth map): Stack 5 depth map 25 s → 13 s. Not used for DNGs
+or the pyramid, where decoding overlaps with GPU work anyway.
 
 **Finding:** rawler already decodes CR3 (and NEF, ARW, RAF, ORF, RW2, …); a probe on
 Stack 5 (CR3 originals of Stack 1) converted fine. What differs from Lightroom's DNGs:

@@ -62,6 +62,12 @@ pub trait FrameSource: Sync {
         None
     }
 
+    /// Whether decoding a frame is slow compared to processing it (e.g. CR3), so that
+    /// keeping decoded frames between passes pays off.
+    fn slow_to_decode(&self) -> bool {
+        false
+    }
+
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -88,6 +94,111 @@ impl FrameSource for FileFrames {
     fn frame_size(&self) -> Option<(usize, usize)> {
         let info = crate::io::read_frame_info(self.paths.first()?).ok()?;
         Some((info.width, info.height))
+    }
+
+    /// DNGs decode quickly; camera formats like CR3 take several times as long.
+    fn slow_to_decode(&self) -> bool {
+        self.paths.iter().any(|p| !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dng")))
+    }
+}
+
+/// Share of the installed memory used to keep decoded frames between passes.
+const CACHE_SHARE: u64 = 4;
+/// Budget when the installed memory can't be determined.
+const FALLBACK_CACHE_BUDGET: u64 = 4 << 30;
+
+/// Memory budget of the frame cache: a quarter of the installed memory.
+pub fn frame_cache_budget() -> u64 {
+    let sys = sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
+    );
+    sys.ok().map(|s| s.total_memory() / CACHE_SHARE).filter(|b| *b > 0).unwrap_or(FALLBACK_CACHE_BUDGET)
+}
+
+/// Keeps Bayer mosaics of `inner` in compact 16-bit form, so each file is decoded once
+/// per stacking run instead of once per pass (alignment, analysis and – for the depth
+/// map – compositing). Decoding dominates with camera raw formats like CR3. Frames
+/// beyond the budget are decoded again. Every mosaic goes through the same quantisation,
+/// so all passes see identical data.
+struct CachedFrames<'a> {
+    inner: &'a dyn FrameSource,
+    budget: u64,
+    /// Cached frames and the bytes they use.
+    cache: std::sync::Mutex<(Vec<Option<Arc<CompactMosaic>>>, u64)>,
+}
+
+struct CompactMosaic {
+    data: Vec<u16>,
+    width: usize,
+    height: usize,
+    pattern: CfaPattern,
+}
+
+impl CompactMosaic {
+    /// Covers −1/16 … 1.27 of white (values below black occur from noise) in steps of
+    /// 2·10⁻⁵, finer than the 6·10⁻⁵ of 14-bit raw data.
+    const OFFSET: f32 = 1.0 / 16.0;
+    const SCALE: f32 = 49152.0;
+
+    fn new(mosaic: &Plane, pattern: CfaPattern) -> Self {
+        use rayon::prelude::*;
+        let data = mosaic
+            .data()
+            .par_iter()
+            .map(|v| ((v + Self::OFFSET) * Self::SCALE).round().clamp(0.0, u16::MAX as f32) as u16)
+            .collect();
+        Self { data, width: mosaic.width(), height: mosaic.height(), pattern }
+    }
+
+    fn to_frame(&self) -> SourceFrame {
+        use rayon::prelude::*;
+        let data = self.data.par_iter().map(|&q| q as f32 / Self::SCALE - Self::OFFSET).collect();
+        SourceFrame::Mosaic(Plane::from_vec(self.width, self.height, data), self.pattern)
+    }
+
+    fn bytes(&self) -> u64 {
+        self.data.len() as u64 * 2
+    }
+}
+
+impl<'a> CachedFrames<'a> {
+    fn new(inner: &'a dyn FrameSource, budget: u64) -> Self {
+        Self { inner, budget, cache: std::sync::Mutex::new((vec![None; inner.len()], 0)) }
+    }
+}
+
+impl FrameSource for CachedFrames<'_> {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn load(&self, index: usize) -> Result<RgbImage> {
+        self.inner.load(index)
+    }
+
+    fn load_frame(&self, index: usize) -> Result<SourceFrame> {
+        if let Some(hit) = self.cache.lock().unwrap().0[index].clone() {
+            return Ok(hit.to_frame());
+        }
+        let frame = self.inner.load_frame(index)?;
+        let SourceFrame::Mosaic(mosaic, pattern) = &frame else { return Ok(frame) };
+        let compact = Arc::new(CompactMosaic::new(mosaic, *pattern));
+        let mut cache = self.cache.lock().unwrap();
+        if cache.1 + compact.bytes() <= self.budget && cache.0[index].is_none() {
+            cache.1 += compact.bytes();
+            cache.0[index] = Some(compact.clone());
+        }
+        drop(cache);
+        // Quantised like cached frames, so every pass sees the same data.
+        Ok(compact.to_frame())
+    }
+
+    fn frame_size(&self) -> Option<(usize, usize)> {
+        self.inner.frame_size()
+    }
+
+    fn slow_to_decode(&self) -> bool {
+        self.inner.slow_to_decode()
     }
 }
 
@@ -211,6 +322,17 @@ fn stack_with<B: Backend>(
     snapshot: Option<&dyn Fn(Snapshot)>,
     cancel: &CancelToken,
 ) -> Result<StackResult> {
+    // The cache only pays off when decoding is slow and every frame is read three times
+    // (alignment, analysis, compositing); otherwise decoding overlaps with the GPU work
+    // anyway and the cache just costs memory.
+    let passes = usize::from(settings.align) + if matches!(settings.method, Method::DepthMap { .. }) { 2 } else { 1 };
+    let cached;
+    let source: &dyn FrameSource = if source.slow_to_decode() && passes >= 3 {
+        cached = CachedFrames::new(source, frame_cache_budget());
+        &cached
+    } else {
+        source
+    };
     let run = || {
         let alignment =
             if settings.align { Some(align_with(backend, source, progress, snapshot, cancel)?) } else { None };
@@ -384,6 +506,62 @@ pub(crate) mod tests {
 
     fn unaligned(method: Method) -> StackSettings {
         StackSettings { method, align: false, use_gpu: false }
+    }
+
+    /// Mosaic frames that count how often each was decoded.
+    struct CountingMosaics {
+        frames: Vec<Plane>,
+        loads: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl FrameSource for CountingMosaics {
+        fn len(&self) -> usize {
+            self.frames.len()
+        }
+        fn load(&self, _: usize) -> Result<RgbImage> {
+            unreachable!("mosaic source")
+        }
+        fn load_frame(&self, index: usize) -> Result<SourceFrame> {
+            self.loads.lock().unwrap()[index] += 1;
+            Ok(SourceFrame::Mosaic(self.frames[index].clone(), CfaPattern::RGGB))
+        }
+    }
+
+    #[test]
+    fn frame_cache_decodes_each_frame_once() {
+        let frames: Vec<Plane> = (0..3).map(|i| noise(32, 24, 10 + i)).collect();
+        let source = CountingMosaics { loads: std::sync::Mutex::new(vec![0; 3]), frames };
+        let cached = CachedFrames::new(&source, u64::MAX);
+        for _pass in 0..3 {
+            for i in 0..3 {
+                let SourceFrame::Mosaic(m, _) = cached.load_frame(i).unwrap() else { panic!() };
+                // Quantisation error stays far below raw data precision.
+                let err = m.data().iter().zip(source.frames[i].data()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+                assert!(err < 2e-5, "{err}");
+            }
+        }
+        assert_eq!(*source.loads.lock().unwrap(), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn frame_cache_respects_budget() {
+        let frames: Vec<Plane> = (0..3).map(|i| noise(32, 24, 20 + i)).collect();
+        let source = CountingMosaics { loads: std::sync::Mutex::new(vec![0; 3]), frames };
+        // Room for exactly one compact frame (2 bytes per photosite).
+        let cached = CachedFrames::new(&source, 32 * 24 * 2);
+        for _pass in 0..2 {
+            for i in 0..3 {
+                cached.load_frame(i).unwrap();
+            }
+        }
+        assert_eq!(*source.loads.lock().unwrap(), vec![1, 2, 2]);
+        // Uncached frames are quantised the same way as cached ones.
+        let (SourceFrame::Mosaic(a, _), SourceFrame::Mosaic(b, _)) =
+            (cached.load_frame(1).unwrap(), cached.load_frame(1).unwrap())
+        else {
+            panic!()
+        };
+        assert_eq!(a, b);
     }
 
     #[test]

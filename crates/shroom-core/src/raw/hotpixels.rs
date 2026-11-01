@@ -32,22 +32,28 @@ pub fn remove_hot_pixels(mosaic: &mut Plane) -> usize {
     if w < 5 || h < 5 {
         return 0;
     }
-    let src = &*mosaic;
+    let wi = w as isize;
+    let same = NEIGHBOURS.map(|(dx, dy)| dy * wi + dx);
+    let adjacent = ADJACENT.map(|(dx, dy)| dy * wi + dx);
+    let data = mosaic.data();
     let fixes: Vec<(usize, f32)> = (2..h - 2)
         .into_par_iter()
         .flat_map_iter(|y| {
             (2..w - 2).filter_map(move |x| {
-                let v = src.get(x, y);
-                let at = |(dx, dy): (isize, isize)| src.get((x as isize + dx) as usize, (y as isize + dy) as usize);
-                let mut nb = NEIGHBOURS.map(at);
-                let max = nb.iter().cloned().fold(f32::MIN, f32::max);
-                let adjacent = ADJACENT.map(at).into_iter().fold(f32::MIN, f32::max);
-                if v - max > MIN_EXCESS && v > RATIO * max.max(MIN_EXCESS / RATIO) && v > ADJACENT_RATIO * adjacent {
-                    nb.sort_by(f32::total_cmp);
-                    Some((y * w + x, 0.5 * (nb[3] + nb[4])))
-                } else {
-                    None
+                let i = y * w + x;
+                let v = data[i];
+                if v <= MIN_EXCESS {
+                    return None;
                 }
+                let at = |offset: isize| data[(i as isize + offset) as usize];
+                // Early exit: almost every photosite already fails at its first neighbour.
+                let same_bound = (v - MIN_EXCESS).min(v / RATIO);
+                if !same.iter().all(|&o| at(o) < same_bound) || !adjacent.iter().all(|&o| at(o) < v / ADJACENT_RATIO) {
+                    return None;
+                }
+                let mut nb = same.map(at);
+                nb.sort_by(f32::total_cmp);
+                Some((i, 0.5 * (nb[3] + nb[4])))
             })
         })
         .collect();

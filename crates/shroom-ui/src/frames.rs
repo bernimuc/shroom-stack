@@ -197,7 +197,13 @@ pub fn preflight(list: &FrameList, memory: Option<u64>) -> Vec<Issue> {
                  use Rotate left/right to change it.",
             ));
         }
-        let needed = estimated_memory(first.width, first.height);
+        let mut needed = estimated_memory(first.width, first.height);
+        // Slow-to-decode formats (e.g. CR3) keep decoded frames in memory: 2 bytes per
+        // photosite, at most a quarter of the installed memory.
+        if list.frames.iter().any(|f| !f.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dng"))) {
+            let cache = 2 * (first.width * first.height * infos.len()) as u64;
+            needed += cache.min(memory.unwrap_or(u64::MAX) / 4);
+        }
         if let Some(total) = memory
             && needed > total / 4 * 3
         {
