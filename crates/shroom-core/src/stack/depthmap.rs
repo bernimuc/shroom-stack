@@ -12,21 +12,31 @@
 
 use rayon::prelude::*;
 
+use super::bokeh::{self, SoftBokeh};
 use super::{Context, Stage};
 use crate::compute::{Backend, box_blur, gaussian_blur};
 use crate::error::Result;
 use crate::filter::{expand, reduce};
 use crate::image::{Plane, RgbImage};
 
-pub(super) fn stack<B: Backend>(ctx: &Context<B>, radius: usize, smoothing: f32) -> Result<(RgbImage, Plane)> {
+pub(super) fn stack<B: Backend>(
+    ctx: &Context<B>,
+    radius: usize,
+    smoothing: f32,
+    bokeh: Option<&SoftBokeh>,
+) -> Result<(RgbImage, Plane, Option<Plane>)> {
     let b = ctx.backend;
     let n = ctx.source.len();
+    let mut analysis = bokeh.map(|_| bokeh::Analysis::new());
 
     // Pass 1: arg-max of the focus measure (best, sum, depth), plus the first frame's
     // brightness for noise normalisation.
     let mut state: Option<[B::Plane; 4]> = None;
     ctx.for_each_frame(Stage::Analysing, 0..n, |i, frame| {
         let focus = focus_measure(b, &frame, radius);
+        if let Some(a) = &mut analysis {
+            a.add(b, &frame);
+        }
         match &mut state {
             None => {
                 let (w, h) = b.rgb_size(&frame);
@@ -48,8 +58,13 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, radius: usize, smoothing: f32)
     drop((best, sum, brightness));
     let (sigma, self_weight) = smoothing_params(radius, smoothing);
     let blur = |p: &Plane, sigma: f32| b.download_plane(&gaussian_blur(b, &b.upload_plane(p), sigma));
-    let depth = smooth_depth(&b.download_plane(&depth), &confidence, sigma, self_weight, n, &blur);
+    let mut depth = smooth_depth(&b.download_plane(&depth), &confidence, sigma, self_weight, n, &blur);
     drop(confidence);
+    // Soft bokeh: bokeh areas take their depth from the bokeh frame.
+    let bokeh = analysis.zip(bokeh).and_then(|(a, settings)| a.finish(settings));
+    if let Some(map) = &bokeh {
+        bokeh::mix(depth.data_mut(), map.expand(&map.depth).data(), map.expand(&map.mask).data(), 1);
+    }
 
     // Pass 2: blend frames by fractional depth; frames no pixel uses are skipped.
     let mut used = vec![false; n];
@@ -64,7 +79,7 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, radius: usize, smoothing: f32)
         ctx.snapshot(Stage::Compositing, i, &frame, Some(&depth_dev), false);
         Ok(())
     })?;
-    Ok((b.download_rgb(&out), depth))
+    Ok((b.download_rgb(&out), depth, bokeh.map(|m| m.mask)))
 }
 
 /// Confidences below this multiple of the image's 10th percentile count as noise.
@@ -160,7 +175,7 @@ fn smooth_depth(
 /// Normalised interpolation `num / den` that fills areas where `den` is (nearly) zero
 /// from coarser scales, so arbitrarily large featureless regions get a consistent value
 /// from their surroundings. `None` if `den` is zero everywhere.
-fn push_pull(num: &Plane, den: &Plane) -> Option<Plane> {
+pub(super) fn push_pull(num: &Plane, den: &Plane) -> Option<Plane> {
     let mean_den = den.data().par_iter().map(|&v| v as f64).sum::<f64>() / den.data().len() as f64;
     if mean_den <= 0.0 {
         return None;

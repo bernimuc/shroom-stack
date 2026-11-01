@@ -10,6 +10,7 @@
 //! independently crushed the shadows and tinted them (typically purple). In the log
 //! domain halos are relative to the local brightness and the result stays positive.
 
+use super::bokeh::{self, SoftBokeh};
 use super::{Context, Stage};
 use crate::compute::{Backend, box_blur};
 use crate::error::Result;
@@ -33,9 +34,14 @@ struct Pyramid<P> {
     base: [P; 3],
 }
 
-pub(super) fn stack<B: Backend>(ctx: &Context<B>, smoothing: usize) -> Result<(RgbImage, Plane)> {
+pub(super) fn stack<B: Backend>(
+    ctx: &Context<B>,
+    smoothing: usize,
+    bokeh: Option<&SoftBokeh>,
+) -> Result<(RgbImage, Plane, Option<Plane>)> {
     let b = ctx.backend;
     let n = ctx.source.len();
+    let mut analysis = bokeh.map(|_| bokeh::Analysis::new());
     let radius = (smoothing / 2).max(1);
 
     // Fused pyramid, its per-level energies and the finest-level source map (which
@@ -46,6 +52,9 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, smoothing: usize) -> Result<(R
         // Live view: the frame (before encoding) and the source map so far.
         let map = state.as_ref().map(|(_, _, source)| source);
         ctx.snapshot(Stage::Analysing, i, &frame, map, false);
+        if let Some(a) = &mut analysis {
+            a.add(b, &frame);
+        }
         b.log_rgb(&mut frame, LOG_OFFSET);
         let pyr = decompose(b, &frame, level_count(w, h));
         drop(frame);
@@ -76,7 +85,25 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, smoothing: usize) -> Result<(R
     let mut image = collapse(b, fused);
     b.exp_rgb(&mut image, LOG_OFFSET);
     b.clamp_min_rgb(&mut image, 0.0);
-    Ok((b.download_rgb(&image), b.download_plane(&source)))
+    let (mut image, mut source) = (b.download_rgb(&image), b.download_plane(&source));
+
+    // Soft bokeh: an extra pass composing bokeh areas from their frames, mixed in with
+    // the feathered mask (smooth enough that no multi-scale blending is needed).
+    let bokeh = analysis.zip(bokeh).and_then(|(a, settings)| a.finish(settings));
+    if let Some(map) = &bokeh {
+        let (depth, mask) = (map.expand(&map.depth), map.expand(&map.mask));
+        let depth_dev = b.upload_plane(&depth);
+        let mut soft = b.zeros_rgb(image.width(), image.height());
+        let used = map.used_frames(n);
+        ctx.for_each_frame(Stage::Compositing, (0..n).filter(|&i| used[i]), |i, frame| {
+            b.blend(&mut soft, &frame, &depth_dev, i);
+            ctx.snapshot(Stage::Compositing, i, &frame, Some(&depth_dev), false);
+            Ok(())
+        })?;
+        bokeh::mix(image.data_mut(), b.download_rgb(&soft).data(), mask.data(), 3);
+        bokeh::mix(source.data_mut(), depth.data(), mask.data(), 1);
+    }
+    Ok((image, source, bokeh.map(|m| m.mask)))
 }
 
 fn level_count(w: usize, h: usize) -> usize {
@@ -179,7 +206,7 @@ mod tests {
         let frames = crate::stack::tests::MemFrames(vec![f0, f1]);
         let cancel = Default::default();
         let ctx = Context::new(&Cpu, &frames, None, &|_| {}, None, &cancel);
-        let out = stack(&ctx, 4).unwrap().0;
+        let out = stack(&ctx, 4, None).unwrap().0;
 
         // Dark strip next to the edge (where halos appear), away from the image border.
         let (mut clipped, mut sum_out, mut sum_true, mut n) = (0, [0.0f32; 3], [0.0f32; 3], 0);
@@ -209,7 +236,7 @@ mod tests {
         let frames = crate::stack::tests::MemFrames(vec![img.clone(), img.clone(), img.clone()]);
         let cancel = Default::default();
         let ctx = Context::new(&Cpu, &frames, None, &|_| {}, None, &cancel);
-        let out = stack(&ctx, 4).unwrap().0;
+        let out = stack(&ctx, 4, None).unwrap().0;
         let err = img.data().iter().zip(out.data()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
         assert!(err < 1e-5, "{err}");
     }

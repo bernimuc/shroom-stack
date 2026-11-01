@@ -7,7 +7,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use shroom_core::io::{self, FrameInfo};
 use shroom_core::render::{render_depth_map, render_display};
-use shroom_core::stack::{self, CancelToken, FileFrames, Method, StackSettings, Stage};
+use shroom_core::stack::{self, BokehFrame, CancelToken, FileFrames, Method, SoftBokeh, StackSettings, Stage};
 use shroom_core::{DisplayImage, Rect};
 
 #[derive(Parser)]
@@ -21,6 +21,12 @@ struct Cli {
 enum MethodArg {
     DepthMap,
     Pyramid,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum BokehArg {
+    MostBlurred,
+    NearestFocus,
 }
 
 #[derive(Subcommand)]
@@ -53,6 +59,15 @@ enum Command {
         /// Also write the depth map (or pyramid source map) as false-colour JPEG.
         #[arg(long)]
         depth_map: Option<PathBuf>,
+        /// Keep out-of-focus backgrounds soft, taken from this frame.
+        #[arg(long, value_enum)]
+        bokeh: Option<BokehArg>,
+        /// Soft bokeh detection threshold (1–10, higher detects more).
+        #[arg(long, default_value_t = SoftBokeh::DEFAULT.threshold)]
+        bokeh_threshold: u32,
+        /// Also write a JPEG preview with the soft bokeh areas tinted.
+        #[arg(long)]
+        bokeh_mask: Option<PathBuf>,
     },
     /// Compare detail energy of DNGs (development aid for tuning the stackers). Prints the
     /// mean over the whole image and, per tile, the ratio to the first file.
@@ -93,13 +108,38 @@ fn main() -> anyhow::Result<()> {
         Command::Sharpness { files, tiles } => sharpness(&files, tiles),
         Command::Shadows { files, threshold } => shadows(&files, threshold),
         Command::Preview { input, output, size, crop, ev } => preview(&input, &output, size, crop, ev),
-        Command::Stack { files, output, method, radius, smoothing, no_align, cpu, preview, depth_map } => {
+        Command::Stack {
+            files,
+            output,
+            method,
+            radius,
+            smoothing,
+            no_align,
+            cpu,
+            preview,
+            depth_map,
+            bokeh,
+            bokeh_threshold,
+            bokeh_mask,
+        } => {
             let method = match method {
                 MethodArg::DepthMap => Method::DepthMap { radius, smoothing },
                 MethodArg::Pyramid => Method::Pyramid { smoothing },
             };
-            let settings = StackSettings { method, align: !no_align, use_gpu: !cpu };
-            stack_files(&files, &output, &settings, preview.as_deref(), depth_map.as_deref())
+            let bokeh = bokeh.map(|frame| SoftBokeh {
+                frame: match frame {
+                    BokehArg::MostBlurred => BokehFrame::MostBlurred,
+                    BokehArg::NearestFocus => BokehFrame::NearestFocus,
+                },
+                threshold: bokeh_threshold,
+            });
+            let settings = StackSettings { method, align: !no_align, use_gpu: !cpu, bokeh };
+            let outputs = Outputs {
+                preview: preview.as_deref(),
+                depth_map: depth_map.as_deref(),
+                bokeh_mask: bokeh_mask.as_deref(),
+            };
+            stack_files(&files, &output, &settings, &outputs)
         }
     }
 }
@@ -134,13 +174,14 @@ fn convert(input: &Path, output: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn stack_files(
-    files: &[PathBuf],
-    output: &Path,
-    settings: &StackSettings,
-    preview: Option<&Path>,
-    depth_map: Option<&Path>,
-) -> anyhow::Result<()> {
+/// Optional extra outputs of `stack`.
+struct Outputs<'a> {
+    preview: Option<&'a Path>,
+    depth_map: Option<&'a Path>,
+    bokeh_mask: Option<&'a Path>,
+}
+
+fn stack_files(files: &[PathBuf], output: &Path, settings: &StackSettings, outputs: &Outputs) -> anyhow::Result<()> {
     let mut frames: Vec<FrameInfo> = files.iter().map(|p| io::read_frame_info(p)).collect::<Result<_, _>>()?;
     io::sort_frames(&mut frames);
     let paths: Vec<PathBuf> = frames.into_iter().map(|f| f.path).collect();
@@ -171,11 +212,25 @@ fn stack_files(
 
     let first = io::load_linear(&paths[0])?;
     io::write_linear_dng(output, &result.image, &first.template, concat!("Shroom Stack ", env!("CARGO_PKG_VERSION")))?;
-    if let Some(path) = preview {
+    if let Some(path) = outputs.preview {
         save_jpeg(&render_display(&result.image, &first.color, Some(2048)), path)?;
     }
-    if let Some(path) = depth_map {
+    if let Some(path) = outputs.depth_map {
         save_jpeg(&render_depth_map(&result.depth_map, (paths.len() - 1) as f32, Some(2048)), path)?;
+    }
+    if let Some(path) = outputs.bokeh_mask {
+        let mut img = render_display(&result.image, &first.color, Some(2048));
+        if let Some(mask) = &result.bokeh_mask {
+            let (sx, sy) = (mask.width() as f32 / img.width as f32, mask.height() as f32 / img.height as f32);
+            for (i, px) in img.data.chunks_mut(3).enumerate() {
+                let (x, y) = ((i % img.width) as f32 * sx, (i / img.width) as f32 * sy);
+                let m = mask.get((x as usize).min(mask.width() - 1), (y as usize).min(mask.height() - 1));
+                px[0] = (px[0] as f32 * (1.0 - 0.6 * m) + 255.0 * 0.6 * m) as u8;
+            }
+        } else {
+            eprintln!("no soft bokeh areas found");
+        }
+        save_jpeg(&img, path)?;
     }
     Ok(())
 }

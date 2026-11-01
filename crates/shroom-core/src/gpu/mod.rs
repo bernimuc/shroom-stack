@@ -427,7 +427,7 @@ mod tests {
         let (_, frames) = banded_stack(96, 64, 3);
         for method in [Method::DEFAULT_DEPTH_MAP, Method::DEFAULT_PYRAMID] {
             let run = |use_gpu| {
-                let settings = StackSettings { method, align: false, use_gpu };
+                let settings = StackSettings { method, align: false, use_gpu, bokeh: None };
                 stack(&frames, &settings, &|_| {}, &CancelToken::default()).unwrap()
             };
             let (cpu, gpu) = (run(false), run(true));

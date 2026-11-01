@@ -47,6 +47,21 @@ fn switching_method_shows_its_parameters() {
     h.get_by_label("Smoothing");
 }
 
+#[test]
+fn soft_bokeh_shows_its_parameters() {
+    let mut h = harness(Vec::new());
+    h.run();
+    assert!(h.query_by_label("Threshold").is_none());
+    h.get_by_label("Soft bokeh").click();
+    h.run();
+    h.get_by_label("Threshold");
+    h.get_by_label("From").click();
+    h.run();
+    h.get_by_label("Nearest focus").click();
+    h.run();
+    h.get(egui_kittest::kittest::by().label("From").value("Nearest focus"));
+}
+
 /// Loads Stack 3 from `examples/` and writes screenshots to `target/ui-screenshots/`.
 /// Run with `cargo test -p shroom-ui -- --ignored`.
 #[test]
@@ -283,4 +298,28 @@ fn cr3_stack() {
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-screenshots");
     std::fs::create_dir_all(&out).unwrap();
     h.render().unwrap().save(out.join("cr3_postprocessing.png")).unwrap();
+}
+
+/// Stack 2 (blurred forest background) with soft bokeh: the detected area can be shown.
+/// Writes a screenshot to `target/ui-screenshots/`.
+#[test]
+#[ignore]
+fn soft_bokeh_stack() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Stack 2");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let files: Vec<PathBuf> =
+        entries.map(|e| e.unwrap().path()).filter(|p| !p.to_string_lossy().contains('(')).collect();
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-screenshots");
+    std::fs::create_dir_all(&out).unwrap();
+    let mut h = harness(files);
+    step_until(&mut h, "files", |a| a.is_idle());
+    h.get_by_label("Soft bokeh").click();
+    h.run();
+    h.get_by_label("Render").click();
+    h.run();
+    step_until(&mut h, "result", |a| a.workspace() == Workspace::Postprocessing && a.is_idle());
+    h.get_by_label_contains("· soft bokeh ·");
+    h.get_by_label("Show soft bokeh area").click();
+    h.run();
+    h.render().unwrap().save(out.join("soft_bokeh.png")).unwrap();
 }

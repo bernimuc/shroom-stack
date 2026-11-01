@@ -8,7 +8,7 @@ use std::sync::mpsc::Receiver;
 use eframe::egui::{self, Color32, RichText, Vec2};
 use shroom_core::render::{ColorInfo, render_depth_map, render_display};
 use shroom_core::retouch::{Brush, Retouch};
-use shroom_core::stack::{Method, Progress, StackSettings, Stage};
+use shroom_core::stack::{BokehFrame, Method, Progress, SoftBokeh, StackSettings, Stage};
 use shroom_core::{Orientation, RgbImage};
 
 use crate::dialogs::{Dialogs, Picked};
@@ -40,13 +40,23 @@ struct Parameters {
     depth_smoothing: u32,
     pyramid_smoothing: u32,
     align: bool,
+    bokeh: bool,
+    bokeh_settings: SoftBokeh,
 }
 
 impl Default for Parameters {
     fn default() -> Self {
         let Method::DepthMap { radius, smoothing } = Method::DEFAULT_DEPTH_MAP else { unreachable!() };
         let Method::Pyramid { smoothing: pyramid_smoothing } = Method::DEFAULT_PYRAMID else { unreachable!() };
-        Self { kind: MethodKind::DepthMap, radius, depth_smoothing: smoothing, pyramid_smoothing, align: true }
+        Self {
+            kind: MethodKind::DepthMap,
+            radius,
+            depth_smoothing: smoothing,
+            pyramid_smoothing,
+            align: true,
+            bokeh: false,
+            bokeh_settings: SoftBokeh::DEFAULT,
+        }
     }
 }
 
@@ -79,6 +89,8 @@ struct Done {
     color: ColorInfo,
     image: TiledImage,
     map: TiledImage,
+    /// Soft bokeh areas as an overlay, if any were found.
+    bokeh: Option<TiledImage>,
 }
 
 impl Done {
@@ -125,6 +137,8 @@ pub struct ShroomApp {
     brush: BrushTool,
     /// Show the depth/source map instead of the result in Postprocessing.
     show_map: bool,
+    /// Tint the soft bokeh areas of the result.
+    show_bokeh: bool,
     /// Orientation of the stack: from the first frame's EXIF, unless set by the user.
     orientation: Orientation,
     orientation_manual: bool,
@@ -151,6 +165,7 @@ impl ShroomApp {
             confirm: None,
             brush: BrushTool { active: false, brush: Brush { radius: 60.0, softness: 0.5 }, source: None, last: None },
             show_map: false,
+            show_bokeh: false,
             orientation: Orientation::Normal,
             orientation_manual: false,
             saving: None,
@@ -325,6 +340,14 @@ impl ShroomApp {
                                 self.frames.frames[0].info.as_ref().map(|i| i.color.clone()).unwrap_or_default();
                             let map = render_depth_map(&finished.result.depth_map, max_index, Some(2048));
                             let map = TiledImage::new(ctx, "result:map", &map);
+                            let bokeh = finished.result.bokeh_mask.as_ref().map(|m| {
+                                TiledImage::overlay(
+                                    ctx,
+                                    "result:bokeh",
+                                    m,
+                                    Color32::from_rgba_unmultiplied(80, 200, 255, 140),
+                                )
+                            });
                             self.status = Some((
                                 false,
                                 format!(
@@ -334,7 +357,9 @@ impl ShroomApp {
                                     finished.result.backend
                                 ),
                             ));
-                            self.done = Some(Done { finished, retouch: Retouch::new(result), color, image, map });
+                            self.show_bokeh = false;
+                            self.done =
+                                Some(Done { finished, retouch: Retouch::new(result), color, image, map, bokeh });
                             self.brush.source = None;
                             self.set_workspace(Workspace::Postprocessing);
                         }
@@ -362,7 +387,13 @@ impl ShroomApp {
         if !ok {
             return;
         }
-        let settings = StackSettings { method: self.params.method(), align: self.params.align, use_gpu: true };
+        let p = &self.params;
+        let settings = StackSettings {
+            method: p.method(),
+            align: p.align,
+            use_gpu: true,
+            bokeh: p.bokeh.then_some(p.bokeh_settings),
+        };
         let color = self.frames.frames[0].info.as_ref().map(|i| i.color.clone()).unwrap_or_default();
         let paths = self.frames.frames.iter().map(|f| f.path.clone()).collect();
         self.running = Some(Running {
@@ -559,6 +590,36 @@ impl ShroomApp {
             ui.checkbox(&mut p.align, "Align frames")
                 .on_hover_text("Compensates shifts and focus breathing between frames (recommended).");
             ui.separator();
+            ui.checkbox(&mut p.bokeh, "Soft bokeh").on_hover_text(
+                "Keeps backgrounds that are out of focus in every frame as soft as in the most blurred frame. \
+                 Expects frames ordered from near to far focus.",
+            );
+            if p.bokeh {
+                let b = &mut p.bokeh_settings;
+                let from_label = ui.label("From");
+                egui::ComboBox::from_id_salt("bokeh_frame")
+                    .selected_text(bokeh_frame_name(b.frame))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut b.frame,
+                            BokehFrame::MostBlurred,
+                            bokeh_frame_name(BokehFrame::MostBlurred),
+                        )
+                        .on_hover_text("Per area, the frame where the background is softest.");
+                        ui.selectable_value(
+                            &mut b.frame,
+                            BokehFrame::NearestFocus,
+                            bokeh_frame_name(BokehFrame::NearestFocus),
+                        )
+                        .on_hover_text("The first frame (focused nearest).");
+                    })
+                    .response
+                    .labelled_by(from_label.id);
+                ui.label("Threshold");
+                ui.add(egui::DragValue::new(&mut b.threshold).range(1..=10))
+                    .on_hover_text("How much detail an area may have and still count as bokeh. Higher finds more.");
+            }
+            ui.separator();
             self.rotate_buttons(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 render = ui
@@ -583,7 +644,8 @@ impl ShroomApp {
     fn processing_toolbar(&mut self, ui: &mut egui::Ui) {
         let Some(running) = &self.running else { return };
         ui.horizontal(|ui| {
-            let compositing = matches!(running.settings.method, Method::DepthMap { .. });
+            let compositing =
+                matches!(running.settings.method, Method::DepthMap { .. }) || running.settings.bokeh.is_some();
             let (fraction, text) = match &running.progress {
                 Some(p) => overall_progress(p, running.settings.align, compositing),
                 None => (0.0, "Starting…".into()),
@@ -610,10 +672,17 @@ impl ShroomApp {
             };
             let img = done.retouch.image();
             let (w, h) = self.orientation.display_size(img.width() as f32, img.height() as f32);
-            ui.label(format!("{method} · {} images · {w}×{h}", done.finished.paths.len()));
+            let bokeh = if s.bokeh.is_some() { " · soft bokeh" } else { "" };
+            ui.label(format!("{method}{bokeh} · {} images · {w}×{h}", done.finished.paths.len()));
             ui.separator();
             ui.add_enabled(!self.brush.active, egui::Checkbox::new(&mut self.show_map, "Show depth map"))
                 .on_hover_text("Which frame each part of the result comes from (blue = first, red = last).");
+            if s.bokeh.is_some() {
+                let found = done.bokeh.is_some();
+                ui.add_enabled(found, egui::Checkbox::new(&mut self.show_bokeh, "Show soft bokeh area"))
+                    .on_hover_text("Areas taken from the bokeh frame, tinted.")
+                    .on_disabled_hover_text("No background was found that is out of focus in every frame.");
+            }
             ui.separator();
             if ui.button("Rotate left").on_hover_text("Rotate the result 90° counter-clockwise (Cmd/Ctrl+[)").clicked()
             {
@@ -958,7 +1027,13 @@ impl ShroomApp {
         };
         let placeholder = if frame.is_some() { "Loading…" } else { "No image selected" };
         let mut view = self.view;
-        viewer::show(ui, &mut view, &[Pane { label: &label, image, placeholder }], None, self.orientation);
+        viewer::show(
+            ui,
+            &mut view,
+            &[Pane { label: &label, image, placeholder, overlay: None }],
+            None,
+            self.orientation,
+        );
         self.view = view;
     }
 
@@ -973,11 +1048,17 @@ impl ShroomApp {
         };
         let size = running.size;
         let panes = [
-            Pane { label: &frame_label, image: running.frame.as_ref().map(|t| (t, size)), placeholder: "Starting…" },
+            Pane {
+                label: &frame_label,
+                image: running.frame.as_ref().map(|t| (t, size)),
+                placeholder: "Starting…",
+                overlay: None,
+            },
             Pane {
                 label: map_label,
                 image: running.map.as_ref().map(|t| (t, size)),
                 placeholder: "The depth map appears after alignment.",
+                overlay: None,
             },
         ];
         let mut view = self.view;
@@ -992,12 +1073,13 @@ impl ShroomApp {
         let frame = self.selected.and_then(|i| self.frames.frames.get(i));
         let left_label = frame.map(|f| format!("{} (aligned)", f.file_name())).unwrap_or_default();
         let left = self.selected_full();
+        let overlay = done.bokeh.as_ref().filter(|_| self.show_bokeh);
         let panes = [
-            Pane { label: &left_label, image: left.map(|t| (t, size)), placeholder: "Loading…" },
+            Pane { label: &left_label, image: left.map(|t| (t, size)), placeholder: "Loading…", overlay: None },
             if self.show_map {
-                Pane { label: "Depth map", image: Some((&done.map, size)), placeholder: "" }
+                Pane { label: "Depth map", image: Some((&done.map, size)), placeholder: "", overlay }
             } else {
-                Pane { label: "Result", image: Some((&done.image, size)), placeholder: "" }
+                Pane { label: "Result", image: Some((&done.image, size)), placeholder: "", overlay }
             },
         ];
         let brush = self.brush.active.then_some(self.brush.brush.radius);
@@ -1005,5 +1087,12 @@ impl ShroomApp {
         let response = viewer::show(ui, &mut view, &panes, brush, self.orientation);
         self.view = view;
         self.paint(response);
+    }
+}
+
+fn bokeh_frame_name(frame: BokehFrame) -> &'static str {
+    match frame {
+        BokehFrame::MostBlurred => "Most blurred frame",
+        BokehFrame::NearestFocus => "Nearest focus",
     }
 }

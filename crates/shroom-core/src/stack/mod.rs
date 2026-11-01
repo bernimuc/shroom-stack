@@ -3,8 +3,11 @@
 //! Both methods stream over the frames, so only a few full-size images are in memory at
 //! any time regardless of the stack size.
 
+mod bokeh;
 mod depthmap;
 mod pyramid;
+
+pub use bokeh::{BokehFrame, SoftBokeh};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -247,11 +250,13 @@ pub struct StackSettings {
     pub align: bool,
     /// Use the GPU if one is available (falls back to the CPU otherwise).
     pub use_gpu: bool,
+    /// Keep out-of-focus backgrounds soft.
+    pub bokeh: Option<SoftBokeh>,
 }
 
 impl StackSettings {
     pub fn new(method: Method) -> Self {
-        Self { method, align: true, use_gpu: true }
+        Self { method, align: true, use_gpu: true, bokeh: None }
     }
 }
 
@@ -260,6 +265,9 @@ pub struct StackResult {
     pub image: RgbImage,
     /// Per pixel, the (fractional) index of the frame the output was taken from.
     pub depth_map: Plane,
+    /// Soft bokeh areas (1 = taken from the bokeh frame), covering the whole image at a
+    /// lower resolution; `None` if soft bokeh is off or found nothing.
+    pub bokeh_mask: Option<Plane>,
     /// Frame alignment, if enabled. The image covers `alignment.crop`.
     pub alignment: Option<Alignment>,
     /// Compute backend that was used, e.g. "CPU" or "GPU: Apple M5 (Metal)".
@@ -337,11 +345,12 @@ fn stack_with<B: Backend>(
         let alignment =
             if settings.align { Some(align_with(backend, source, progress, snapshot, cancel)?) } else { None };
         let ctx = Context::new(backend, source, alignment.as_ref(), progress, snapshot, cancel);
-        let (image, depth_map) = match settings.method {
-            Method::DepthMap { radius, smoothing } => depthmap::stack(&ctx, radius as usize, smoothing as f32)?,
-            Method::Pyramid { smoothing } => pyramid::stack(&ctx, smoothing as usize)?,
+        let bokeh = settings.bokeh.as_ref();
+        let (image, depth_map, bokeh_mask) = match settings.method {
+            Method::DepthMap { radius, smoothing } => depthmap::stack(&ctx, radius as usize, smoothing as f32, bokeh)?,
+            Method::Pyramid { smoothing } => pyramid::stack(&ctx, smoothing as usize, bokeh)?,
         };
-        Ok(StackResult { image, depth_map, alignment, backend: backend.name() })
+        Ok(StackResult { image, depth_map, bokeh_mask, alignment, backend: backend.name() })
     };
     let result = run();
     backend.trim();
@@ -505,7 +514,7 @@ pub(crate) mod tests {
     }
 
     fn unaligned(method: Method) -> StackSettings {
-        StackSettings { method, align: false, use_gpu: false }
+        StackSettings { method, align: false, use_gpu: false, bokeh: None }
     }
 
     /// Mosaic frames that count how often each was decoded.

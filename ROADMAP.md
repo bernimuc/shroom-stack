@@ -1,6 +1,6 @@
 # Shroom Stack – Roadmap for the ideas in IDEAS.md
 
-Status: **agreed plan**, nothing implemented yet. Each feature has a feasibility
+Status: **agreed plan**; features 1–3 are implemented. Each feature has a feasibility
 rating, a proposed approach, dependencies and open questions (marked **Q**). Answers so
 far are recorded as **A**.
 
@@ -123,6 +123,21 @@ prepare a test DNG from Stack 5 for you to compare in Lightroom first.)
 **A:** agreed – start with a test DNG from Stack 5 compared in Lightroom.
 
 ## 3. Soft bokeh
+
+**Status:** implemented for both methods (checkbox "Soft bokeh" with source frame and
+threshold; overlay "Show soft bokeh area" in Postprocessing; CLI `--bokeh`). Detection
+differs from the plan below: the depth map confidence also marks dark in-focus areas, so
+bokeh is detected on a 1/16 grid as areas where (a) the best frame has hardly more fine
+detail than the most blurred one (self-normalising against noise) and (b) blur decreases
+up to the last frame (focus plane beyond the stack; featureless parts of the subject
+peak in between), judged at the scale (8–32 px) where a place changes most. Places that
+can't be judged (no detail, no change) are filled in from their surroundings, so a
+background becomes one area with a gradual edge. Background only, assuming frames go
+from near to far focus (in-camera bracketing): softening out-of-focus foreground smeared
+it over the subject (Stacks 3 and 4). The pyramid method blends the bokeh frames in with
+the feathered mask (extra pass, ~+50 %). "Nearest focus" = the first frame. Results:
+the whole background of Stacks 2 and 4; nothing in Stacks 1 and 3 (no real background
+bokeh).
 
 **Idea restated:** in areas that are out of focus in *every* frame (background bokeh),
 don't take the "least blurred" frame (furthest focus) but the most blurred one, so the

@@ -1,7 +1,7 @@
 //! Zoomable, pannable image view; single or split (both halves share zoom and position).
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
-use shroom_core::{DisplayImage, Orientation};
+use shroom_core::{DisplayImage, Orientation, Plane};
 
 /// Zoom and position shared by all panes.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,16 +93,44 @@ pub struct TiledImage {
 
 impl TiledImage {
     pub fn new(ctx: &egui::Context, name: &str, img: &DisplayImage) -> Self {
+        Self::from_rows(ctx, name, img.width, img.height, |y, x0, w, rgba| {
+            for px in img.data[(y * img.width + x0) * 3..(y * img.width + x0 + w) * 3].chunks(3) {
+                rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            }
+        })
+    }
+
+    /// A translucent overlay in `color`, opaque where `mask` is 1. The mask may have a
+    /// lower resolution than the image it covers.
+    pub fn overlay(ctx: &egui::Context, name: &str, mask: &Plane, color: Color32) -> Self {
+        Self::from_rows(ctx, name, mask.width(), mask.height(), |y, x0, w, rgba| {
+            for m in &mask.data()[y * mask.width() + x0..y * mask.width() + x0 + w] {
+                rgba.extend_from_slice(&[
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    (m.clamp(0.0, 1.0) * color.a() as f32) as u8,
+                ]);
+            }
+        })
+    }
+
+    /// Builds the tiles; `row(y, x0, w, rgba)` appends `w` RGBA pixels of row `y` from `x0`.
+    fn from_rows(
+        ctx: &egui::Context,
+        name: &str,
+        width: usize,
+        height: usize,
+        row: impl Fn(usize, usize, usize, &mut Vec<u8>),
+    ) -> Self {
         let max = ctx.input(|i| i.max_texture_side).min(4096);
         let mut tiles = Vec::new();
-        for y0 in (0..img.height).step_by(max) {
-            for x0 in (0..img.width).step_by(max) {
-                let (w, h) = ((img.width - x0).min(max), (img.height - y0).min(max));
+        for y0 in (0..height).step_by(max) {
+            for x0 in (0..width).step_by(max) {
+                let (w, h) = ((width - x0).min(max), (height - y0).min(max));
                 let mut rgba = Vec::with_capacity(w * h * 4);
                 for y in y0..y0 + h {
-                    for px in img.data[(y * img.width + x0) * 3..(y * img.width + x0 + w) * 3].chunks(3) {
-                        rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
-                    }
+                    row(y, x0, w, &mut rgba);
                 }
                 let color = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
                 let texture = ctx.load_texture(format!("{name}@{x0},{y0}"), color, TextureOptions::LINEAR);
@@ -110,7 +138,7 @@ impl TiledImage {
                 tiles.push((rect, texture));
             }
         }
-        Self { tiles, size: Vec2::new(img.width as f32, img.height as f32) }
+        Self { tiles, size: Vec2::new(width as f32, height as f32) }
     }
 
     /// Replaces the pixels at `(x, y)` (texture pixels) with `img`.
@@ -195,6 +223,8 @@ pub struct Pane<'a> {
     pub image: Option<(&'a TiledImage, Vec2)>,
     /// Text shown instead of an image (e.g. while loading).
     pub placeholder: &'a str,
+    /// Drawn over the image, covering the same area.
+    pub overlay: Option<&'a TiledImage>,
 }
 
 /// What happened in the view this frame.
@@ -291,7 +321,12 @@ pub fn show(
     for (pane, rect) in panes.iter().zip(&pane_rects) {
         let clipped = painter.with_clip_rect(*rect);
         match pane.image {
-            Some((img, size)) => img.paint(&clipped, view, *rect, size, orientation),
+            Some((img, size)) => {
+                img.paint(&clipped, view, *rect, size, orientation);
+                if let Some(overlay) = pane.overlay {
+                    overlay.paint(&clipped, view, *rect, size, orientation);
+                }
+            }
             None => {
                 clipped.text(
                     rect.center(),

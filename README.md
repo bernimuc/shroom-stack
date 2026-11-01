@@ -10,6 +10,9 @@ that stays fully editable in Lightroom.
   between shots); the output is cropped to the area all frames cover.
 - **GPU accelerated** via wgpu (Metal, Vulkan, DirectX 12) with an identical CPU
   fallback; frames are processed one at a time, so stack size doesn't limit memory.
+- **Soft bokeh** (optional): backgrounds that are out of focus in every frame are taken
+  from the most blurred (or nearest-focus) frame, keeping the large-aperture look.
+  Expects frames ordered from near to far focus, as focus bracketing shoots them.
 - **Retouching:** paint parts of any input frame into the result with a soft brush,
   with undo/redo.
 - **Lightroom friendly output:** camera colour profile, white balance, EXIF and XMP
@@ -32,12 +35,13 @@ On Linux the usual windowing libraries are needed (e.g. on Debian/Ubuntu:
 
 1. **Preparation:** add raw files ("Add images…", drag & drop of files or a folder).
    They are sorted by capture time; reorder with Up/Down/Reverse if needed. Choose the
-   method and parameters, then **Render**. Checks run first (frame count, sizes,
+   method and parameters (optionally **Soft bokeh** with its source frame and
+   threshold), then **Render**. Checks run first (frame count, sizes,
    cameras, shooting order, memory).
 2. **Processing:** progress and a live view of the current frame and the depth map;
    **Cancel** goes back to Preparation.
 3. **Postprocessing:** compare any input frame (aligned) with the result or the depth
-   map. **Brush** (B) paints the selected frame into the result; size `[` `]`, undo
+   map; **Show soft bokeh area** tints what soft bokeh replaced. **Brush** (B) paints the selected frame into the result; size `[` `]`, undo
    Cmd/Ctrl+Z, redo Shift+Cmd/Ctrl+Z. **Save…** writes a Linear DNG.
 
 Orientation: taken from the camera (EXIF); **Rotate left/right** (Cmd/Ctrl+[ / ]) in
@@ -58,7 +62,8 @@ cargo run --release -p shroom-cli -- sharpness a.dng b.dng   # compare detail en
 ```
 
 `stack` options: `--method depth-map|pyramid`, `--radius`, `--smoothing`, `--no-align`,
-`--cpu`, `--preview`, `--depth-map`.
+`--cpu`, `--preview`, `--depth-map`, `--bokeh most-blurred|nearest-focus`,
+`--bokeh-threshold`, `--bokeh-mask` (preview with the soft bokeh areas tinted).
 
 ## Development
 
