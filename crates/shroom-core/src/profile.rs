@@ -94,3 +94,58 @@ fn profile_gpu_steps() {
         });
     }
 }
+
+/// Lists isolated outlier photosites (likely hot pixels) per frame of Stack 1 and how
+/// many frames share each position.
+#[test]
+#[ignore]
+fn find_hot_pixels() {
+    use std::collections::HashMap;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Stack 1");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| !p.to_string_lossy().contains('('))
+        .collect();
+    files.sort();
+    let mut seen: HashMap<(usize, usize), (usize, u8, f32, f32)> = HashMap::new();
+    for path in &files {
+        let raw = decode_raw(path).unwrap();
+        // decode_raw already removed hot pixels; count what the filter finds on top.
+        let mut again = raw.mosaic.clone();
+        let extra = crate::raw::remove_hot_pixels(&mut again);
+        let m = &raw.mosaic;
+        let mut count = 0;
+        for y in 2..m.height() - 2 {
+            for x in 2..m.width() - 2 {
+                let v = m.get(x, y);
+                let nb = [
+                    m.get(x - 2, y),
+                    m.get(x + 2, y),
+                    m.get(x, y - 2),
+                    m.get(x, y + 2),
+                    m.get(x - 2, y - 2),
+                    m.get(x + 2, y - 2),
+                    m.get(x - 2, y + 2),
+                    m.get(x + 2, y + 2),
+                ];
+                let max = nb.iter().cloned().fold(f32::MIN, f32::max);
+                if v > 0.02 && v > 3.0 * max.max(0.002) {
+                    count += 1;
+                    let e = seen.entry((x, y)).or_insert((0, raw.pattern.color_at(x, y), v, max));
+                    e.0 += 1;
+                }
+            }
+        }
+        println!(
+            "{}: {count} outliers left, filter would replace {extra} more",
+            path.file_name().unwrap().to_string_lossy()
+        );
+    }
+    let mut common: Vec<_> = seen.into_iter().filter(|(_, (n, ..))| *n >= files.len() / 2).collect();
+    common.sort_by_key(|(p, _)| *p);
+    println!("positions outlying in ≥ half of {} frames: {}", files.len(), common.len());
+    for ((x, y), (n, c, v, max)) in common.iter().take(20) {
+        println!("  ({x}, {y}) colour {c} in {n} frames, e.g. value {v:.4} vs neighbours ≤ {max:.4}");
+    }
+}

@@ -302,3 +302,30 @@ Notes from milestone 8 (polish):
 * Open ends: code signing/notarisation, Windows/Linux packaging, opening files from
   Finder/Explorer, image orientation (rotated shots), occlusion artefacts of the
   depth map method, further GPU kernel fusion.
+
+Pyramid shadow fix (after milestone 8):
+
+* Symptom: pushed shadows of pyramid results turned purple in Lightroom. Cause: linear
+  Laplacian fusion undershoots below black next to bright, sharp edges (Stack 1: ~25 %
+  of dark pixels clipped, shadows ~30 % too dark); clipping each channel separately
+  lifts R and B relative to G.
+* Fix: fuse log-encoded values (`ln(v + 1/256)`), like enfuse's perceptual space. Dark
+  pixels clipped on Stack 1: 22/23/28 % → 5/3/10 %; detail energy equal or higher on all
+  four stacks; the gap under the caps now matches Helicon "C". Offset 1/256 balances
+  shadow noise (smaller offsets) against clipping (larger offsets).
+* Trade-off: coarse levels of sharp and blurred frames mix slightly inexactly in log
+  space (synthetic band test 3× worse, real stacks unaffected).
+* `shroom shadows` (dark-area statistics) and `shroom preview --ev` help inspecting this.
+
+Hot pixel fix:
+
+* Symptom: dotted lines of blue/purple dots in dark areas of results (both methods).
+  Cause: hot photosites at fixed sensor positions (Stack 1, ISO 1600: 26 present in
+  nearly all 34 frames). Alignment scales every frame differently, so each frame's copy
+  of a defect lands elsewhere in the result: a line of dots towards the image centre.
+  Raw converters hide hot pixels, so the single frames look clean in Lightroom.
+* Fix (`raw::remove_hot_pixels`, applied when decoding Bayer data): a photosite > 3× all
+  same-colour neighbours, > 1.5× its direct neighbours and ≥ 1 % of white above them is
+  replaced by the median of its same-colour neighbours. Replaces 70–100 of 47 M
+  photosites per frame in Stack 1, 0–2 in the other stacks; real detail (spread over
+  adjacent photosites by the lens) is kept.

@@ -232,6 +232,8 @@ fn cfa_frame(path: &Path, raw: RawImage, template: DngTemplate) -> Result<RawFra
             *out = (sample(sy * raw.width + sx) - b) / (white - b);
         }
     });
+    // Like raw converters, hide hot photosites (see `raw::remove_hot_pixels`).
+    crate::raw::remove_hot_pixels(&mut mosaic);
     let color = color_info(&raw);
     Ok(RawFrame { mosaic, pattern, color, template })
 }
