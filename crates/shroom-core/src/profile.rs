@@ -149,3 +149,82 @@ fn find_hot_pixels() {
         println!("  ({x}, {y}) colour {c} in {n} frames, e.g. value {v:.4} vs neighbours ≤ {max:.4}");
     }
 }
+
+/// Compares the linear image data of a CR3 and the Lightroom DNG of the same exposure:
+/// finds the crop offset and the per-channel level ratio.
+#[test]
+#[ignore]
+fn compare_cr3_with_dng() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let (cr3, dng) = (root.join("Stack 5/1Z4A4075.CR3"), root.join("Stack 1/1Z4A4075.dng"));
+    if !cr3.exists() || !dng.exists() {
+        return;
+    }
+    let a = load_linear(&cr3).unwrap().image;
+    let b = load_linear(&dng).unwrap().image;
+    println!("CR3 {}x{}, DNG {}x{}", a.width(), a.height(), b.width(), b.height());
+    // Offset of the CR3 area inside the DNG area, by matching a central patch.
+    let (px, py, n) = (a.width() / 2, a.height() / 2, 256);
+    let diff = |dx: usize, dy: usize| -> f64 {
+        let mut s = 0.0;
+        for y in 0..n {
+            for x in 0..n {
+                let (p, q) = (a.pixel(px + x, py + y), b.pixel(px + x + dx, py + y + dy));
+                s += (0..3).map(|c| (p[c] - q[c]).abs() as f64).sum::<f64>();
+            }
+        }
+        s
+    };
+    let mut best = (0, 0, f64::MAX);
+    for dy in 0..=b.height() - a.height() {
+        for dx in 0..=b.width() - a.width() {
+            let d = diff(dx, dy);
+            if d < best.2 {
+                best = (dx, dy, d);
+            }
+        }
+    }
+    let (dx, dy, _) = best;
+    let mut sum = [[0.0f64; 3]; 2];
+    let mut max_rel = 0.0f64;
+    for y in (0..a.height()).step_by(7) {
+        for x in (0..a.width()).step_by(7) {
+            let (p, q) = (a.pixel(x, y), b.pixel(x + dx, y + dy));
+            for c in 0..3 {
+                sum[0][c] += p[c] as f64;
+                sum[1][c] += q[c] as f64;
+                if q[c] > 0.05 {
+                    max_rel = max_rel.max(((p[c] - q[c]) / q[c]).abs() as f64);
+                }
+            }
+        }
+    }
+    println!("offset of CR3 area in DNG: ({dx}, {dy})");
+    println!("level ratio CR3/DNG per channel: {:?}", [0, 1, 2].map(|c| sum[0][c] / sum[1][c]));
+    println!("largest relative pixel difference (values > 5 %): {max_rel:.5}");
+}
+
+/// Prints what rawler reports about the lens and white level of a CR3.
+#[test]
+#[ignore]
+fn cr3_lens_and_levels() {
+    use rawler::decoders::RawDecodeParams;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Stack 5/1Z4A4075.CR3");
+    if !path.exists() {
+        return;
+    }
+    let source = rawler::rawsource::RawSource::new(&path).unwrap();
+    let decoder = rawler::get_decoder(&source).unwrap();
+    let md = decoder.raw_metadata(&source, &RawDecodeParams::default()).unwrap();
+    println!("exif lens_model {:?}, lens_make {:?}", md.exif.lens_model, md.exif.lens_make);
+    println!("lens {:?}", md.lens.as_ref().map(|l| (&l.identifiers, &l.lens_model)));
+    let raw = decoder.raw_image(&source, &RawDecodeParams::default(), true).unwrap();
+    println!(
+        "white {:?} black {:?} model {:?} clean {:?}",
+        raw.whitelevel,
+        raw.blacklevel.levels.first(),
+        raw.model,
+        raw.clean_model
+    );
+    println!("camera hints {:?}", raw.camera.hints);
+}

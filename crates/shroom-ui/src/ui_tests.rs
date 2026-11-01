@@ -9,6 +9,13 @@ use egui_kittest::kittest::Queryable;
 use crate::app::{ShroomApp, Workspace};
 
 fn harness(files: Vec<PathBuf>) -> Harness<'static, ShroomApp> {
+    // Keep learned camera values of the tests out of the user's configuration.
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let path = std::env::temp_dir().join(format!("shroom-ui-test-cameras-{}.json", std::process::id()));
+        // SAFETY: set once, before the first harness loads any file.
+        unsafe { std::env::set_var("SHROOM_CAMERA_STORE", path) };
+    });
     // Realistic frame time, so double-clicks (two clicks within 0.3 s) are recognised.
     Harness::builder()
         .with_size([1400.0, 900.0])
@@ -20,7 +27,7 @@ fn harness(files: Vec<PathBuf>) -> Harness<'static, ShroomApp> {
 fn render_without_images_reports_error() {
     let mut h = harness(Vec::new());
     h.run();
-    h.get_by_label_contains("Add DNG files");
+    h.get_by_label_contains("Add raw files");
     assert!(h.query_by_label("Clear").is_some());
     h.get_by_label("Render").click();
     h.run();
@@ -254,4 +261,26 @@ fn portrait_stack_orientation() {
     step_until(&mut h, "saving", |a| a.is_idle());
     assert_eq!(shroom_core::io::read_frame_info(&saved).unwrap().orientation, Orientation::Cw270);
     std::fs::remove_file(&saved).unwrap();
+}
+
+/// CR3 files (Stack 5) load, pass the checks without calibration warning, and stack.
+#[test]
+#[ignore]
+fn cr3_stack() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Stack 5");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let mut files: Vec<PathBuf> = entries.map(|e| e.unwrap().path()).collect();
+    files.sort();
+    files.truncate(3);
+    let mut h = harness(files);
+    step_until(&mut h, "files", |a| a.is_idle());
+    h.get_by_label_contains("1Z4A4075.CR3");
+    h.get_by_label("Render").click();
+    h.run();
+    assert!(h.query_by_label_contains("No Adobe calibration").is_none());
+    step_until(&mut h, "result", |a| a.workspace() == Workspace::Postprocessing && a.is_idle());
+    h.get_by_label_contains("Stacked 3 images");
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-screenshots");
+    std::fs::create_dir_all(&out).unwrap();
+    h.render().unwrap().save(out.join("cr3_postprocessing.png")).unwrap();
 }

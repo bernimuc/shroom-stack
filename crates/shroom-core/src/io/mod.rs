@@ -1,5 +1,6 @@
 //! Reading and writing image files. Only DNG is supported for now.
 
+pub mod cameras;
 mod reader;
 mod writer;
 mod xmp;
@@ -14,6 +15,18 @@ pub use reader::{DngTemplate, LinearFrame, RawFrame, decode_raw, load_linear, re
 pub use writer::write_linear_dng;
 
 use crate::image::DisplayImage;
+
+/// File extensions of the raw formats that can be read (DNG plus the camera formats
+/// rawler supports).
+pub const RAW_EXTENSIONS: &[&str] = &[
+    "dng", "cr3", "cr2", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf", "orf", "rw2", "pef", "srw", "iiq", "3fr",
+    "fff", "erf", "mef", "mos", "mrw", "kdc", "dcr", "x3f",
+];
+
+/// Whether `path` has the extension of a readable raw format.
+pub fn is_raw_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| RAW_EXTENSIONS.iter().any(|r| r.eq_ignore_ascii_case(e)))
+}
 
 /// Cheap-to-read information about an input file, for the file list.
 #[derive(Clone, Debug)]
@@ -33,6 +46,9 @@ pub struct FrameInfo {
     pub color: crate::render::ColorInfo,
     /// Orientation recorded by the camera.
     pub orientation: crate::Orientation,
+    /// Whether Adobe's calibration values for this camera are known (always for DNGs);
+    /// without them results from raw files look darker in Lightroom.
+    pub camera_values_known: bool,
 }
 
 /// Reads metadata and the embedded preview without decoding the raw image data.
@@ -61,6 +77,17 @@ mod tests {
             preview: None,
             color: Default::default(),
             orientation: Default::default(),
+            camera_values_known: true,
+        }
+    }
+
+    #[test]
+    fn recognises_raw_extensions() {
+        for name in ["a.dng", "b.CR3", "c.nef", "d.ARW"] {
+            assert!(is_raw_file(Path::new(name)), "{name}");
+        }
+        for name in ["a.jpg", "b.tif", "noext", "c.dng.xmp"] {
+            assert!(!is_raw_file(Path::new(name)), "{name}");
         }
     }
 

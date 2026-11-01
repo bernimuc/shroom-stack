@@ -1,7 +1,7 @@
 # Shroom Stack
 
-Focus stacking for macro photography: combines a series of DNG frames with different
-focal planes into one image that is sharp throughout, and writes it as a Linear DNG
+Focus stacking for macro photography: combines a series of raw frames (DNG, CR3 and
+other camera raw formats) with different focal planes into one image that is sharp throughout, and writes it as a Linear DNG
 that stays fully editable in Lightroom.
 
 - **Two methods:** *depth map* (each pixel from its sharpest frame, parameters radius and
@@ -30,7 +30,7 @@ On Linux the usual windowing libraries are needed (e.g. on Debian/Ubuntu:
 
 ## Using the app
 
-1. **Preparation:** add DNG files ("Add images…", drag & drop of files or a folder).
+1. **Preparation:** add raw files ("Add images…", drag & drop of files or a folder).
    They are sorted by capture time; reorder with Up/Down/Reverse if needed. Choose the
    method and parameters, then **Render**. Checks run first (frame count, sizes,
    cameras, shooting order, memory).

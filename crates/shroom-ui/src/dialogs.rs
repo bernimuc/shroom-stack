@@ -35,9 +35,12 @@ impl Dialogs {
         self.open
     }
 
-    pub fn pick_dngs(&mut self) {
+    pub fn pick_raw_files(&mut self) {
         self.spawn(|| async {
-            let files = rfd::AsyncFileDialog::new().add_filter("DNG", &["dng", "DNG"]).pick_files().await;
+            let files = rfd::AsyncFileDialog::new()
+                .add_filter("Raw images", shroom_core::io::RAW_EXTENSIONS)
+                .pick_files()
+                .await;
             Picked::Open(files.unwrap_or_default().iter().map(|f| f.path().to_path_buf()).collect())
         });
     }

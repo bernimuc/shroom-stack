@@ -20,14 +20,12 @@ impl Frame {
     }
 }
 
-fn is_dng(p: &Path) -> bool {
-    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dng"))
-}
+use shroom_core::io::is_raw_file;
 
-/// Expands folders (one level) and keeps DNG files; returns them and the number of files
-/// skipped because they are not DNGs.
-pub fn collect_dngs(paths: impl IntoIterator<Item = PathBuf>) -> (Vec<PathBuf>, usize) {
-    let (mut dngs, mut skipped) = (Vec::new(), 0);
+/// Expands folders (one level) and keeps raw files (DNG, CR3, …); returns them and the
+/// number of files skipped because they are not in a supported format.
+pub fn collect_raw_files(paths: impl IntoIterator<Item = PathBuf>) -> (Vec<PathBuf>, usize) {
+    let (mut found, mut skipped) = (Vec::new(), 0);
     for path in paths {
         if path.is_dir() {
             let mut entries: Vec<PathBuf> = std::fs::read_dir(&path)
@@ -35,19 +33,19 @@ pub fn collect_dngs(paths: impl IntoIterator<Item = PathBuf>) -> (Vec<PathBuf>, 
                 .unwrap_or_default();
             entries.sort();
             for entry in entries {
-                if is_dng(&entry) {
-                    dngs.push(entry);
+                if is_raw_file(&entry) {
+                    found.push(entry);
                 } else if !entry.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
                     skipped += 1;
                 }
             }
-        } else if is_dng(&path) {
-            dngs.push(path);
+        } else if is_raw_file(&path) {
+            found.push(path);
         } else {
             skipped += 1;
         }
     }
-    (dngs, skipped)
+    (found, skipped)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -182,6 +180,17 @@ pub fn preflight(list: &FrameList, memory: Option<u64>) -> Vec<Issue> {
         if infos.iter().any(|(_, i)| i.camera != first.camera) {
             issues.push(Issue::warning("The images come from different cameras."));
         }
+        let extension = |f: &Frame| f.path.extension().map(|e| e.to_string_lossy().to_lowercase());
+        if list.frames.iter().any(|f| extension(f) != extension(&list.frames[0])) {
+            issues.push(Issue::error("The images have different file formats; a stack must use one format."));
+        }
+        if let Some((_, info)) = infos.iter().find(|(_, i)| !i.camera_values_known) {
+            issues.push(Issue::warning(format!(
+                "No Adobe calibration known yet for the {}: the result will look about 0.4 EV darker in \
+                 Lightroom. Opening one Lightroom DNG from this camera in Shroom Stack teaches it.",
+                info.camera
+            )));
+        }
         if infos.iter().any(|(_, i)| i.orientation != first.orientation) {
             issues.push(Issue::warning(
                 "The images have different orientations. The stack uses the first image's orientation; \
@@ -230,6 +239,7 @@ mod tests {
             preview: None,
             color: Default::default(),
             orientation: Default::default(),
+            camera_values_known: true,
         }
     }
 
@@ -256,14 +266,15 @@ mod tests {
     }
 
     #[test]
-    fn collects_dngs_from_files_and_folders() {
+    fn collects_raw_files_from_files_and_folders() {
         let dir = tempfile::tempdir().unwrap();
-        for name in ["b.DNG", "a.dng", "notes.txt", ".DS_Store"] {
+        for name in ["b.DNG", "a.dng", "c.CR3", "notes.txt", ".DS_Store"] {
             std::fs::write(dir.path().join(name), b"").unwrap();
         }
-        let (dngs, skipped) = collect_dngs([dir.path().to_path_buf(), PathBuf::from("x.dng"), PathBuf::from("y.jpg")]);
-        let names: Vec<_> = dngs.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
-        assert_eq!(names, ["a.dng", "b.DNG", "x.dng"]);
+        let (found, skipped) =
+            collect_raw_files([dir.path().to_path_buf(), PathBuf::from("x.dng"), PathBuf::from("y.jpg")]);
+        let names: Vec<_> = found.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["a.dng", "b.DNG", "c.CR3", "x.dng"]);
         assert_eq!(skipped, 2, "notes.txt and y.jpg; hidden files are ignored silently");
     }
 
@@ -329,6 +340,15 @@ mod tests {
         assert!(has(&issues, Severity::Error, "b is 12×100"));
         assert!(has(&issues, Severity::Warning, "different cameras"));
         assert!(has(&issues, Severity::Warning, "shooting order"));
+
+        let mut mixed_formats =
+            list(&[("a.cr3", "2026-01-01 10:00:01", 10, "C"), ("b.dng", "2026-01-01 10:00:02", 10, "C")]);
+        assert!(has(&preflight(&mixed_formats, None), Severity::Error, "different file formats"));
+        mixed_formats.frames[1].path = PathBuf::from("b.CR3");
+        mixed_formats.frames[0].info.as_mut().unwrap().camera_values_known = false;
+        let issues = preflight(&mixed_formats, None);
+        assert!(!has(&issues, Severity::Error, "different file formats"), "{issues:?}");
+        assert!(has(&issues, Severity::Warning, "No Adobe calibration"));
 
         let mut rotated = list(&[("a", "2026-01-01 10:00:01", 10, "C"), ("b", "2026-01-01 10:00:02", 10, "C")]);
         rotated.frames[1].info.as_mut().unwrap().orientation = shroom_core::Orientation::Cw90;

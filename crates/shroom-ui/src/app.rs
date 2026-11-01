@@ -190,13 +190,18 @@ impl ShroomApp {
 
     /// Adds DNG files; folders are searched (one level deep).
     fn add_files(&mut self, paths: Vec<PathBuf>) {
-        let (dngs, skipped) = crate::frames::collect_dngs(paths);
-        let added = self.frames.add(dngs);
+        let (found, skipped) = crate::frames::collect_raw_files(paths);
+        let added = self.frames.add(found);
         self.status = match (added.is_empty(), skipped) {
             (true, 0) => None,
-            (true, n) => Some((true, format!("No DNG files added ({n} other files ignored; only DNG is supported)."))),
+            (true, n) => Some((
+                true,
+                format!(
+                    "No raw files added ({n} other files ignored; only raw formats like DNG or CR3 are supported)."
+                ),
+            )),
             (false, 0) => None,
-            (false, n) => Some((false, format!("{n} files ignored: only DNG is supported."))),
+            (false, n) => Some((false, format!("{n} files ignored: only raw formats like DNG or CR3 are supported."))),
         };
         for path in added {
             self.loader.request_info(path);
@@ -801,7 +806,7 @@ impl ShroomApp {
         ui.add_enabled_ui(editable, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if ui.add_enabled(!self.dialogs.is_open(), egui::Button::new("Add images…")).clicked() {
-                    self.dialogs.pick_dngs();
+                    self.dialogs.pick_raw_files();
                 }
                 if ui
                     .add_enabled(!self.frames.frames.is_empty(), egui::Button::new("Clear"))
@@ -848,7 +853,7 @@ impl ShroomApp {
             if self.frames.frames.is_empty() {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("Add DNG files or drop files or a folder here.").weak())
+                    ui.label(RichText::new("Add raw files (DNG, CR3, …) or drop files or a folder here.").weak())
                 });
             }
             for (i, frame) in self.frames.frames.iter().enumerate() {

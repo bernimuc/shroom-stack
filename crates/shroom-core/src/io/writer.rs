@@ -71,6 +71,10 @@ fn write_to(path: &Path, image: &RgbImage, template: &DngTemplate, software: &st
     dng.thumbnail(&preview).map_err(enc_err)?;
 
     dng.load_base_tags(&raw).map_err(enc_err)?;
+    // The camera's own model string (e.g. "Canon EOS R5"), as raw converters write it.
+    if !raw.model.is_empty() {
+        dng.root_ifd_mut().add_tag(TiffCommonTag::Model, raw.model.as_str());
+    }
     dng.load_metadata(&template.metadata).map_err(enc_err)?;
     dng.root_ifd_mut().add_tag(ExifTag::Orientation, raw.orientation.to_u16());
     // The source's own colour tags take precedence: rawler rounds matrices when writing.

@@ -55,6 +55,13 @@ Lightroom plugin (to verify: whether the SDK can rotate photos in the catalogue)
 
 ## 2. Camera RAW support (CR3 etc.)
 
+**Status:** implemented – all rawler formats accepted; built-in Adobe values for the
+Canon EOS R5 and R7, learned automatically from any Lightroom raw DNG (stored in the
+user's configuration directory); original lens name and Canon lens ID in EXIF/XMP;
+previews downscaled to 1024 px. Stack 5 (CR3) gives the same result as Stack 1 (DNG).
+Follow-up: stacking from CR3 is slower (decoding; depth map reads each frame three
+times) – a decoded-frame cache would help now.
+
 **Finding:** rawler already decodes CR3 (and NEF, ARW, RAF, ORF, RW2, …); a probe on
 Stack 5 (CR3 originals of Stack 1) converted fine. What differs from Lightroom's DNGs:
 
@@ -79,6 +86,33 @@ Stack 5 (CR3 originals of Stack 1) converted fine. What differs from Lightroom's
   per camera, and copy its profile tags (we already copy them from DNG sources).
 - Regression check: Stack 5 (CR3) vs Stack 1 (DNG) must give the same geometry and
   equivalent results.
+
+**Lightroom test (Stack 5 vs Stack 1, same exposure):**
+- Lightroom applies its own "Adobe Color" to all variants, also without embedded profile
+  data – the camera is recognised by `UniqueCameraModel`.
+- Image data from CR3 and from Lightroom's DNG is identical up to a uniform factor
+  (1.1165, all channels) and a 4 px crop offset: rawler normalises to the sensor's real
+  clipping point (white 14888), Adobe to the full range (16383). Colour information is
+  the same – no further colour test needed.
+- Result from CR3 looked darker: BaselineExposure (R5: +0.39 EV) missing, partly offset by
+  the factor above (net ≈ −0.23 EV). CameraCalibration (R5: red ×1.017) missing too.
+- Lens profile not recognised: rawler replaces the EXIF lens name with its database
+  spelling ("RF 35mm …" instead of "RF35mm …") and CR3s have no XMP lens fields. rawler
+  does provide the original name and Canon's lens ID (61182).
+
+**Implementation plan**
+1. Accept all rawler raw formats (dialogs, drag & drop, folders); one format per stack.
+2. Thumbnails from the embedded preview, downscaled (CR3 previews are 8192 px).
+3. Metadata: original lens name and lens ID in EXIF and XMP (`aux:Lens`, `aux:LensID`),
+   original camera model string.
+4. Brightness/calibration: keep rawler's clipping point; write BaselineExposure (camera
+   value − log2 of the normalisation difference) and CameraCalibration from a source of
+   Adobe values per camera (see Q2.3).
+5. Tests: Stack 5 vs Stack 1 equivalence; lens tags; UI accepts CR3.
+
+**Q2.3** Source of the per-camera Adobe values: (A) built-in table for known cameras,
+(B) learned automatically from any Lightroom DNG the app reads, or A + B (proposal)?
+**A:** A + B.
 
 **Q2.1** Which formats matter to you – Canon CR3 only, or others too?
 **A:** CR3 now (only format available for testing); other cameras later, test stacks can

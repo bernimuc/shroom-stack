@@ -5,7 +5,18 @@ use std::path::{Path, PathBuf};
 
 use shroom_core::io;
 
+/// Keeps learned camera values of these tests out of the user's configuration.
+fn isolate_camera_store() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let path = std::env::temp_dir().join(format!("shroom-test-cameras-{}.json", std::process::id()));
+        // SAFETY: set once, before any test reads files (all tests call this first).
+        unsafe { std::env::set_var("SHROOM_CAMERA_STORE", path) };
+    });
+}
+
 fn examples_dir() -> Option<PathBuf> {
+    isolate_camera_store();
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     dir.is_dir().then_some(dir)
 }
@@ -136,4 +147,67 @@ fn helicon_results_are_readable() {
             assert!(frame.color.xyz_to_cam.is_some());
         }
     }
+}
+
+/// A CR3 (Stack 5) and Lightroom's DNG of the same exposure (Stack 1) give the same image
+/// data, and a result from the CR3 carries the values Lightroom needs.
+#[test]
+#[ignore]
+fn cr3_matches_lightroom_dng() {
+    let Some(dir) = examples_dir() else { return };
+    let (cr3, dng) = (dir.join("Stack 5/1Z4A4075.CR3"), dir.join("Stack 1/1Z4A4075.dng"));
+    if !cr3.exists() || !dng.exists() {
+        return;
+    }
+    let a = io::load_linear(&cr3).unwrap();
+    let b = io::load_linear(&dng).unwrap();
+    // rawler crops 4 px more on each side and normalises to the sensor's clipping point
+    // (black 2047, white 14888) instead of Adobe's full range (2047…16384).
+    let factor = (16384.0f32 - 2047.0) / (14888.0 - 2047.0);
+    let (dx, dy) = (4, 4);
+    let mut max_rel = 0.0f32;
+    for y in (0..a.image.height()).step_by(11) {
+        for x in (0..a.image.width()).step_by(11) {
+            let (p, q) = (a.image.pixel(x, y), b.image.pixel(x + dx, y + dy));
+            for c in 0..3 {
+                if q[c] > 0.05 && p[c] < 0.99 {
+                    max_rel = max_rel.max((p[c] / factor - q[c]).abs() / q[c]);
+                }
+            }
+        }
+    }
+    assert!(max_rel < 0.002, "image data differs by up to {:.3} %", max_rel * 100.0);
+    for c in 0..3 {
+        assert!((a.color.wb[c] - b.color.wb[c]).abs() < 1e-4, "white balance {:?} vs {:?}", a.color.wb, b.color.wb);
+    }
+
+    let out = tempfile::tempdir().unwrap();
+    let path = out.path().join("from-cr3.dng");
+    io::write_linear_dng(&path, &a.image, &a.template, "test").unwrap();
+    let source = rawler::rawsource::RawSource::new(&path).unwrap();
+    let decoder = rawler::get_decoder(&source).unwrap();
+    let root = decoder.ifd(rawler::decoders::WellKnownIFD::Root).unwrap().unwrap();
+    let rational = |tag: u16| match root.get_entry(tag).map(|e| &e.value) {
+        Some(rawler::formats::tiff::Value::SRational(v)) => v[0].n as f32 / v[0].d as f32,
+        other => panic!("tag {tag}: {other:?}"),
+    };
+    let expected_be = 0.39 - factor.log2();
+    assert!((rational(50730) - expected_be).abs() < 0.002, "BaselineExposure {}", rational(50730));
+    assert!((rational(50723) - 1.017).abs() < 1e-3, "CameraCalibration1");
+    let info = io::read_frame_info(&path).unwrap();
+    assert_eq!(info.camera, "Canon EOS R5");
+    let xmp = match root.get_entry(700u16).map(|e| &e.value) {
+        Some(rawler::formats::tiff::Value::Byte(b) | rawler::formats::tiff::Value::Undefined(b)) => {
+            String::from_utf8_lossy(b).into_owned()
+        }
+        _ => String::new(),
+    };
+    assert!(xmp.contains(r#"aux:Lens="RF35mm F1.8 MACRO IS STM""#), "{xmp}");
+    assert!(xmp.contains(r#"aux:LensID="61182""#), "{xmp}");
+    let exif = decoder.ifd(rawler::decoders::WellKnownIFD::Exif).unwrap().unwrap();
+    let lens_model = match exif.get_entry(0xA434u16).map(|e| &e.value) {
+        Some(rawler::formats::tiff::Value::Ascii(a)) => a.strings()[0].clone(),
+        other => panic!("LensModel {other:?}"),
+    };
+    assert_eq!(lens_model, "RF35mm F1.8 MACRO IS STM");
 }

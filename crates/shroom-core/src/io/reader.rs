@@ -138,7 +138,11 @@ pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
     // A dummy decode parses the image layout without decompressing pixel data.
     let raw = decoder.raw_image(&source, &params, true).map_err(|e| decode_err(path, e))?;
     let (width, height) = raw.active_area.map(|a| (a.d.w, a.d.h)).unwrap_or((raw.width, raw.height));
+    let camera_values_known = camera_values(decoder.as_ref(), &raw).1;
     let preview = decoder.preview_image(&source, &params).ok().flatten().map(|img| {
+        // Some formats embed full-size previews (CR3: 8192 px); thumbnails don't need that.
+        let img =
+            if img.width().max(img.height()) > MAX_PREVIEW { img.thumbnail(MAX_PREVIEW, MAX_PREVIEW) } else { img };
         let rgb = img.to_rgb8();
         DisplayImage { width: rgb.width() as usize, height: rgb.height() as usize, data: rgb.into_raw() }
     });
@@ -153,6 +157,7 @@ pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
         preview,
         color: color_info(&raw),
         orientation: crate::Orientation::from_exif(raw.orientation.to_u16()),
+        camera_values_known,
     })
 }
 
@@ -164,12 +169,80 @@ fn capture_time(metadata: &RawMetadata) -> Option<NaiveDateTime> {
         .ok()
 }
 
+/// Longer side of previews kept in [`FrameInfo`].
+const MAX_PREVIEW: u32 = 1024;
+
+/// TIFF tag present in every DNG.
+const DNG_VERSION_TAG: u16 = 50706;
+
+fn root_entries(decoder: &dyn Decoder, filter: &dyn Fn(u16) -> bool) -> Vec<(u16, Value)> {
+    decoder
+        .ifd(WellKnownIFD::Root)
+        .ok()
+        .flatten()
+        .map(|ifd| ifd.value_iter().filter(|(t, _)| filter(**t)).map(|(t, v)| (*t, v.clone())).collect())
+        .unwrap_or_default()
+}
+
+/// Key of a camera in the Adobe value store; matches `UniqueCameraModel` of our files.
+fn camera_key(raw: &RawImage) -> String {
+    format!("{} {}", raw.clean_make, raw.clean_model)
+}
+
+/// Learns Adobe's camera values from an Adobe-made raw DNG, or looks them up for other
+/// raw formats. Returns tags to add to result files (empty for DNGs, which carry them),
+/// and whether values are available.
+fn camera_values(decoder: &dyn Decoder, raw: &RawImage) -> (Vec<(u16, Value)>, bool) {
+    let is_dng = !root_entries(decoder, &|t| t == DNG_VERSION_TAG).is_empty();
+    let black = raw.blacklevel.levels.first().map(|r| r.as_f32()).unwrap_or(0.0);
+    let white = raw.whitelevel.0.first().copied().unwrap_or(u16::MAX as u32) as f32;
+    let cfa = matches!(raw.photometric, RawPhotometricInterpretation::Cfa(_));
+    if is_dng {
+        // Only raw (CFA) DNGs: linear DNGs, e.g. our own results, use another normalisation.
+        if cfa
+            && let Some(values) = super::cameras::CameraValues::from_dng_tags(
+                &root_entries(decoder, &|t| COLOR_ROOT_TAGS.contains(&t)),
+                black,
+                white,
+            )
+        {
+            super::cameras::learn(&camera_key(raw), values);
+        }
+        return (Vec::new(), true);
+    }
+    match super::cameras::lookup(&camera_key(raw)) {
+        Some(values) => (values.to_dng_tags(black, white), true),
+        None => (Vec::new(), false),
+    }
+}
+
+/// Minimal XMP with the lens fields Lightroom uses to find lens profiles, for raw formats
+/// without XMP of their own.
+fn lens_xmp(metadata: &RawMetadata) -> Option<String> {
+    let lens = metadata.lens.as_ref()?;
+    let name = lens.identifiers.name.as_deref()?;
+    let escape = |s: &str| s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
+    let id = lens.identifiers.id.map(|(id, _)| format!(" aux:LensID=\"{id}\"")).unwrap_or_default();
+    Some(format!(
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+         <rdf:Description rdf:about=\"\" xmlns:aux=\"http://ns.adobe.com/exif/1.0/aux/\" \
+         xmlns:exifEX=\"http://cipa.jp/exif/1.0/\" aux:Lens=\"{n}\"{id} exifEX:LensModel=\"{n}\"/>\
+         </rdf:RDF></x:xmpmeta>",
+        n = escape(name)
+    ))
+}
+
 /// Decodes the full image data and the metadata needed to write a result file.
 fn decode_full(path: &Path) -> Result<(RawImage, DngTemplate)> {
     let Opened { source, decoder } = open(path)?;
     let params = RawDecodeParams::default();
-    let metadata = decoder.raw_metadata(&source, &params).map_err(|e| decode_err(path, e))?;
+    let mut metadata = decoder.raw_metadata(&source, &params).map_err(|e| decode_err(path, e))?;
     let mut raw = decoder.raw_image(&source, &params, false).map_err(|e| decode_err(path, e))?;
+    // rawler replaces the lens name with its database spelling; Lightroom matches lens
+    // profiles by the name the camera wrote.
+    if let Some(name) = metadata.lens.as_ref().and_then(|l| l.identifiers.name.clone()) {
+        metadata.exif.lens_model = Some(name);
+    }
     let ifd_tags = |which, filter: &dyn Fn(u16) -> bool| -> Result<Vec<(u16, Value)>> {
         Ok(decoder
             .ifd(which)
@@ -186,11 +259,19 @@ fn decode_full(path: &Path) -> Result<(RawImage, DngTemplate)> {
         }
     }
     let raw_tags = ifd_tags(WellKnownIFD::VirtualDngRawTags, &|t| KEPT_RAW_TAGS.contains(&t))?;
+    for (tag, value) in camera_values(decoder.as_ref(), &raw).0 {
+        if !root_tags.iter().any(|(t, _)| *t == tag) {
+            root_tags.push((tag, value));
+        }
+    }
     // rawler's DNG decoder doesn't implement `xpacket`, so read the XMP tag directly.
-    let xmp = ifd_tags(WellKnownIFD::Root, &|t| t == XMP_TAG)?.into_iter().find_map(|(_, value)| match value {
-        Value::Byte(bytes) | Value::Undefined(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
-        _ => None,
-    });
+    let xmp = ifd_tags(WellKnownIFD::Root, &|t| t == XMP_TAG)?
+        .into_iter()
+        .find_map(|(_, value)| match value {
+            Value::Byte(bytes) | Value::Undefined(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+            _ => None,
+        })
+        .or_else(|| lens_xmp(&metadata));
     let data = std::mem::replace(&mut raw.data, RawImageData::Integer(Vec::new()));
     let template = DngTemplate { raw: raw.clone(), metadata, root_tags, raw_tags, xmp };
     raw.data = data;
