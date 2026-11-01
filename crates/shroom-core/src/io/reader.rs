@@ -86,6 +86,17 @@ impl DngTemplate {
     pub fn color(&self) -> ColorInfo {
         color_info(&self.raw)
     }
+
+    pub fn orientation(&self) -> crate::Orientation {
+        crate::Orientation::from_exif(self.raw.orientation.to_u16())
+    }
+
+    /// The same template, writing `orientation` into result files.
+    pub fn with_orientation(&self, orientation: crate::Orientation) -> Self {
+        let mut t = self.clone();
+        t.raw.orientation = rawler::Orientation::from_u16(orientation.to_exif());
+        t
+    }
 }
 
 /// A Bayer raw frame, cropped to the active area and normalised to `0..=1`.
@@ -141,6 +152,7 @@ pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
         height,
         preview,
         color: color_info(&raw),
+        orientation: crate::Orientation::from_exif(raw.orientation.to_u16()),
     })
 }
 

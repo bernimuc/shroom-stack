@@ -210,3 +210,48 @@ fn cancel_returns_to_preparation() {
     step_until(&mut h, "cancel", |a| a.workspace() == Workspace::Preparation);
     h.get_by_label("Stacking cancelled.");
 }
+
+/// Portrait stack (Stack 4, shot at 270°): shown upright, rotatable, and the saved file
+/// carries the chosen orientation.
+#[test]
+#[ignore]
+fn portrait_stack_orientation() {
+    use shroom_core::Orientation;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Stack 4");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let mut files: Vec<PathBuf> =
+        entries.map(|e| e.unwrap().path()).filter(|p| !p.to_string_lossy().contains('(')).collect();
+    files.sort();
+    files.truncate(3);
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-screenshots");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let mut h = harness(files);
+    step_until(&mut h, "files", |a| a.is_idle());
+    assert_eq!(h.state().orientation(), Orientation::Cw270, "taken from EXIF");
+    h.render().unwrap().save(out.join("portrait_preparation.png")).unwrap();
+
+    h.get_by_label("Render").click();
+    h.run();
+    step_until(&mut h, "result", |a| a.workspace() == Workspace::Postprocessing && a.is_idle());
+    h.render().unwrap().save(out.join("portrait_postprocessing.png")).unwrap();
+
+    // Rotate the result once more to the right (270° + 90° = upright sensor orientation).
+    h.get_by_label("Rotate right").click();
+    h.run();
+    assert_eq!(h.state().orientation(), Orientation::Normal);
+    let saved = std::env::temp_dir().join("shroom-ui-portrait.dng");
+    let _ = std::fs::remove_file(&saved);
+    h.state_mut().save_for_test(saved.clone());
+    step_until(&mut h, "saving", |a| a.is_idle());
+    assert_eq!(shroom_core::io::read_frame_info(&saved).unwrap().orientation, Orientation::Normal);
+
+    // Back to 270° via the keyboard shortcut; saving again writes it.
+    h.key_press_modifiers(eframe::egui::Modifiers::COMMAND, eframe::egui::Key::OpenBracket);
+    h.run();
+    assert_eq!(h.state().orientation(), Orientation::Cw270);
+    h.state_mut().save_for_test(saved.clone());
+    step_until(&mut h, "saving", |a| a.is_idle());
+    assert_eq!(shroom_core::io::read_frame_info(&saved).unwrap().orientation, Orientation::Cw270);
+    std::fs::remove_file(&saved).unwrap();
+}

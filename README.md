@@ -40,6 +40,9 @@ On Linux the usual windowing libraries are needed (e.g. on Debian/Ubuntu:
    map. **Brush** (B) paints the selected frame into the result; size `[` `]`, undo
    Cmd/Ctrl+Z, redo Shift+Cmd/Ctrl+Z. **Save…** writes a Linear DNG.
 
+Orientation: taken from the camera (EXIF); **Rotate left/right** (Cmd/Ctrl+[ / ]) in
+Preparation and Postprocessing override it for the whole stack and for the saved file.
+
 Viewer: mouse wheel zooms at the cursor, dragging pans (with the brush: Space+drag),
 double-click switches between fit and 1:1 at the clicked point; Fit, 1:1, −, + and the
 slider are below the image.

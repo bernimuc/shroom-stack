@@ -30,8 +30,12 @@ fn stacks() -> Vec<PathBuf> {
         eprintln!("examples/ not found, skipping");
         return Vec::new();
     };
-    let mut stacks: Vec<_> =
-        std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.is_dir()).collect();
+    // Stacks of DNG files; folders with other raw formats (e.g. CR3) are not covered here.
+    let mut stacks: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_dir() && dngs(p).len() >= 2)
+        .collect();
     stacks.sort();
     stacks
 }

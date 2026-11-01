@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use eframe::egui::{self, Color32, RichText, Vec2};
-use shroom_core::RgbImage;
 use shroom_core::render::{ColorInfo, render_depth_map, render_display};
 use shroom_core::retouch::{Brush, Retouch};
 use shroom_core::stack::{Method, Progress, StackSettings, Stage};
+use shroom_core::{Orientation, RgbImage};
 
 use crate::dialogs::{Dialogs, Picked};
 use crate::frames::{FrameList, Issue, Severity, preflight};
@@ -125,6 +125,9 @@ pub struct ShroomApp {
     brush: BrushTool,
     /// Show the depth/source map instead of the result in Postprocessing.
     show_map: bool,
+    /// Orientation of the stack: from the first frame's EXIF, unless set by the user.
+    orientation: Orientation,
+    orientation_manual: bool,
     saving: Option<Receiver<Result<PathBuf, String>>>,
     dialogs: Dialogs,
     loader: Loader,
@@ -148,6 +151,8 @@ impl ShroomApp {
             confirm: None,
             brush: BrushTool { active: false, brush: Brush { radius: 60.0, softness: 0.5 }, source: None, last: None },
             show_map: false,
+            orientation: Orientation::Normal,
+            orientation_manual: false,
             saving: None,
             dialogs: Dialogs::new(cc.egui_ctx.clone()),
             loader: Loader::new(cc.egui_ctx.clone()),
@@ -257,6 +262,7 @@ impl ShroomApp {
                     let selected = self.selected_path();
                     self.frames.sort_by_capture_time();
                     self.selected = selected.and_then(|p| self.frames.frames.iter().position(|f| f.path == p));
+                    self.update_auto_orientation();
                 }
                 Loaded::Full(request, Ok(img)) if Some(&request) == self.full_request().as_ref() => {
                     let name = format!("full:{}", request.path.display());
@@ -376,7 +382,8 @@ impl ShroomApp {
 
     fn save_to(&mut self, path: PathBuf) {
         let Some(done) = &self.done else { return };
-        let (image, template) = (done.retouch.image().clone(), done.finished.template.clone());
+        let (image, template) =
+            (done.retouch.image().clone(), done.finished.template.with_orientation(self.orientation));
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let software = concat!("Shroom Stack ", env!("CARGO_PKG_VERSION"));
@@ -392,6 +399,35 @@ impl ShroomApp {
     #[cfg(test)]
     pub fn save_for_test(&mut self, path: PathBuf) {
         self.save_to(path);
+    }
+
+    /// Follows the first frame's EXIF orientation unless the user rotated the stack.
+    fn update_auto_orientation(&mut self) {
+        if !self.orientation_manual {
+            self.orientation =
+                self.frames.frames.first().and_then(|f| f.info.as_ref()).map(|i| i.orientation).unwrap_or_default();
+        }
+    }
+
+    fn rotate(&mut self, clockwise: bool) {
+        self.orientation = if clockwise { self.orientation.rotated_cw() } else { self.orientation.rotated_ccw() };
+        self.orientation_manual = true;
+        self.view = ViewState::default();
+    }
+
+    /// "Rotate left/right" buttons.
+    fn rotate_buttons(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Rotate left").on_hover_text("Rotate the stack 90° counter-clockwise (Cmd/Ctrl+[)").clicked() {
+            self.rotate(false);
+        }
+        if ui.button("Rotate right").on_hover_text("Rotate the stack 90° clockwise (Cmd/Ctrl+])").clicked() {
+            self.rotate(true);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn orientation(&self) -> Orientation {
+        self.orientation
     }
 
     fn discard_result(&mut self) {
@@ -411,6 +447,21 @@ impl eframe::App for ShroomApp {
         });
         if !dropped.is_empty() && self.workspace == Workspace::Preparation {
             self.add_files(dropped);
+        }
+        // Rotation shortcuts as in Lightroom.
+        if self.workspace != Workspace::Processing && self.confirm.is_none() && !ctx.egui_wants_keyboard_input() {
+            let (left, right) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::OpenBracket),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::CloseBracket),
+                )
+            });
+            if left {
+                self.rotate(false);
+            }
+            if right {
+                self.rotate(true);
+            }
         }
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
@@ -502,6 +553,8 @@ impl ShroomApp {
             ui.separator();
             ui.checkbox(&mut p.align, "Align frames")
                 .on_hover_text("Compensates shifts and focus breathing between frames (recommended).");
+            ui.separator();
+            self.rotate_buttons(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 render = ui
                     .add(egui::Button::new(RichText::new("Render").strong()).min_size(Vec2::new(90.0, 0.0)))
@@ -541,6 +594,7 @@ impl ShroomApp {
 
     fn postprocessing_toolbar(&mut self, ui: &mut egui::Ui) {
         let Some(done) = &self.done else { return };
+        let mut rotate = None;
         let mut save = false;
         let mut new_stack = false;
         ui.horizontal(|ui| {
@@ -550,10 +604,19 @@ impl ShroomApp {
                 Method::Pyramid { smoothing } => format!("Pyramid (smoothing {smoothing})"),
             };
             let img = done.retouch.image();
-            ui.label(format!("{method} · {} images · {}×{}", done.finished.paths.len(), img.width(), img.height()));
+            let (w, h) = self.orientation.display_size(img.width() as f32, img.height() as f32);
+            ui.label(format!("{method} · {} images · {w}×{h}", done.finished.paths.len()));
             ui.separator();
             ui.add_enabled(!self.brush.active, egui::Checkbox::new(&mut self.show_map, "Show depth map"))
                 .on_hover_text("Which frame each part of the result comes from (blue = first, red = last).");
+            ui.separator();
+            if ui.button("Rotate left").on_hover_text("Rotate the result 90° counter-clockwise (Cmd/Ctrl+[)").clicked()
+            {
+                rotate = Some(false);
+            }
+            if ui.button("Rotate right").on_hover_text("Rotate the result 90° clockwise (Cmd/Ctrl+])").clicked() {
+                rotate = Some(true);
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 save = ui
                     .add_enabled(
@@ -567,6 +630,9 @@ impl ShroomApp {
             });
         });
         self.brush_toolbar(ui);
+        if let Some(clockwise) = rotate {
+            self.rotate(clockwise);
+        }
         if save {
             self.save();
         }
@@ -743,6 +809,8 @@ impl ShroomApp {
                     .clicked()
                 {
                     self.frames.clear();
+                    self.orientation_manual = false;
+                    self.orientation = Orientation::Normal;
                     self.full = None;
                     self.issues = None;
                     self.status = None;
@@ -798,8 +866,11 @@ impl ShroomApp {
                             let thumb_size = Vec2::new(96.0, 64.0);
                             match self.thumbs.get(&frame.path).and_then(|t| t.single()) {
                                 Some((tex, size)) => {
-                                    let scale = (thumb_size.x / size.x).min(thumb_size.y / size.y);
-                                    ui.add(egui::Image::new(egui::load::SizedTexture::new(tex.id(), size * scale)));
+                                    let (w, h) = self.orientation.display_size(size.x, size.y);
+                                    let scale = (thumb_size.x / w).min(thumb_size.y / h);
+                                    let (rect, _) =
+                                        ui.allocate_exact_size(Vec2::new(w, h) * scale, egui::Sense::hover());
+                                    viewer::paint_rotated(ui.painter(), tex.id(), rect, self.orientation);
                                 }
                                 None => {
                                     ui.add_sized(thumb_size, egui::Spinner::new());
@@ -882,7 +953,7 @@ impl ShroomApp {
         };
         let placeholder = if frame.is_some() { "Loading…" } else { "No image selected" };
         let mut view = self.view;
-        viewer::show(ui, &mut view, &[Pane { label: &label, image, placeholder }], None);
+        viewer::show(ui, &mut view, &[Pane { label: &label, image, placeholder }], None, self.orientation);
         self.view = view;
     }
 
@@ -905,7 +976,7 @@ impl ShroomApp {
             },
         ];
         let mut view = self.view;
-        viewer::show(ui, &mut view, &panes, None);
+        viewer::show(ui, &mut view, &panes, None, self.orientation);
         self.view = view;
     }
 
@@ -926,7 +997,7 @@ impl ShroomApp {
         ];
         let brush = self.brush.active.then_some(self.brush.brush.radius);
         let mut view = self.view;
-        let response = viewer::show(ui, &mut view, &panes, brush);
+        let response = viewer::show(ui, &mut view, &panes, brush, self.orientation);
         self.view = view;
         self.paint(response);
     }

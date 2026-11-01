@@ -110,7 +110,16 @@ fn info(files: &[PathBuf]) -> anyhow::Result<()> {
     for f in &frames {
         let time = f.capture_time.map(|t| t.format("%Y-%m-%d %H:%M:%S%.3f").to_string()).unwrap_or("-".into());
         let preview = f.preview.as_ref().map(|p| format!("{}x{}", p.width, p.height)).unwrap_or("-".into());
-        println!("{}  {}  {}  {}x{}  preview {}", f.file_name, time, f.camera, f.width, f.height, preview);
+        println!(
+            "{}  {}  {}  {}x{}  {}°  preview {}",
+            f.file_name,
+            time,
+            f.camera,
+            f.width,
+            f.height,
+            f.orientation.degrees(),
+            preview
+        );
     }
     Ok(())
 }

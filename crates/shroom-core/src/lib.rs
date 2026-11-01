@@ -19,4 +19,4 @@ pub mod stack;
 mod profile;
 
 pub use error::{Error, Result};
-pub use image::{DisplayImage, Plane, Rect, RgbImage};
+pub use image::{DisplayImage, Orientation, Plane, Rect, RgbImage};

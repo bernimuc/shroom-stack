@@ -31,6 +31,8 @@ pub struct FrameInfo {
     pub preview: Option<DisplayImage>,
     /// Colour information for rendering the image data.
     pub color: crate::render::ColorInfo,
+    /// Orientation recorded by the camera.
+    pub orientation: crate::Orientation,
 }
 
 /// Reads metadata and the embedded preview without decoding the raw image data.
@@ -58,6 +60,7 @@ mod tests {
             height: 0,
             preview: None,
             color: Default::default(),
+            orientation: Default::default(),
         }
     }
 

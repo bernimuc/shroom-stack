@@ -1,7 +1,7 @@
 //! Zoomable, pannable image view; single or split (both halves share zoom and position).
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
-use shroom_core::DisplayImage;
+use shroom_core::{DisplayImage, Orientation};
 
 /// Zoom and position shared by all panes.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -143,19 +143,49 @@ impl TiledImage {
         }
     }
 
-    /// Paints the image, which covers `image_size` image pixels, into `pane`.
-    fn paint(&self, painter: &egui::Painter, view: &ViewState, pane: Rect, image_size: Vec2) {
+    /// Paints the image, which covers `image_size` stored-image pixels, into `pane`,
+    /// rotated by `orientation` (the view works in display coordinates).
+    fn paint(&self, painter: &egui::Painter, view: &ViewState, pane: Rect, image_size: Vec2, orientation: Orientation) {
         let scale = image_size / self.size;
-        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         for (rect, texture) in &self.tiles {
-            let min = view.image_to_screen(pane, rect.min.to_vec2() * scale);
-            let max = view.image_to_screen(pane, rect.max.to_vec2() * scale);
-            let screen = Rect::from_min_max(min, max);
-            if screen.intersects(pane) {
-                painter.image(texture.id(), screen, uv, Color32::WHITE);
+            let corner = |p: Pos2| {
+                let stored = p.to_vec2() * scale;
+                let (x, y) = orientation.to_display((stored.x, stored.y), (image_size.x, image_size.y));
+                view.image_to_screen(pane, Vec2::new(x, y))
+            };
+            let quad = [
+                corner(rect.left_top()),
+                corner(rect.right_top()),
+                corner(rect.right_bottom()),
+                corner(rect.left_bottom()),
+            ];
+            if Rect::from_points(&quad).intersects(pane) {
+                painter.add(textured_quad(texture.id(), quad));
             }
         }
     }
+}
+
+/// A texture drawn onto four screen points: its top-left, top-right, bottom-right and
+/// bottom-left corners, in that order (which rotates it as needed).
+fn textured_quad(texture: egui::TextureId, corners: [Pos2; 4]) -> egui::Shape {
+    let mut mesh = egui::Mesh::with_texture(texture);
+    let uvs = [Pos2::new(0.0, 0.0), Pos2::new(1.0, 0.0), Pos2::new(1.0, 1.0), Pos2::new(0.0, 1.0)];
+    for (pos, uv) in corners.into_iter().zip(uvs) {
+        mesh.vertices.push(egui::epaint::Vertex { pos, uv, color: Color32::WHITE });
+    }
+    mesh.indices.extend([0, 1, 2, 0, 2, 3]);
+    egui::Shape::mesh(mesh)
+}
+
+/// Paints a whole texture into `rect` (sized for the displayed orientation), rotated by
+/// `orientation`. Used for thumbnails.
+pub fn paint_rotated(painter: &egui::Painter, texture: egui::TextureId, rect: Rect, orientation: Orientation) {
+    let corner = |x: f32, y: f32| {
+        let (u, v) = orientation.to_display((x, y), (1.0, 1.0));
+        rect.min + Vec2::new(u, v) * rect.size()
+    };
+    painter.add(textured_quad(texture, [corner(0.0, 0.0), corner(1.0, 0.0), corner(1.0, 1.0), corner(0.0, 1.0)]));
 }
 
 /// One half of the view.
@@ -170,17 +200,29 @@ pub struct Pane<'a> {
 /// What happened in the view this frame.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ViewResponse {
-    /// Image position under the pointer.
+    /// Stored-image position (sensor orientation) under the pointer.
     pub hovered: Option<Vec2>,
     /// The primary button is held over the image (and the view is not being panned).
     pub painting: bool,
 }
 
 /// Shows one or more panes side by side with shared zoom/pan, plus the zoom controls.
-/// `brush` (radius in image pixels) draws a brush outline at the pointer in every pane.
-pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane], brush: Option<f32>) -> ViewResponse {
+/// Images are given in stored (sensor) orientation and shown rotated by `orientation`;
+/// the view state works in display coordinates. `brush` (radius in image pixels) draws a
+/// brush outline at the pointer in every pane.
+pub fn show(
+    ui: &mut egui::Ui,
+    view: &mut ViewState,
+    panes: &[Pane],
+    brush: Option<f32>,
+    orientation: Orientation,
+) -> ViewResponse {
     let ppp = ui.ctx().pixels_per_point();
-    let image_size = panes.iter().find_map(|p| p.image.map(|(_, s)| s));
+    let stored_size = panes.iter().find_map(|p| p.image.map(|(_, s)| s));
+    let image_size = stored_size.map(|s| {
+        let (w, h) = orientation.display_size(s.x, s.y);
+        Vec2::new(w, h)
+    });
     let controls_height = 28.0;
     let area = ui.available_rect_before_wrap();
     let views_rect = Rect::from_min_max(area.min, Pos2::new(area.max.x, area.max.y - controls_height));
@@ -249,7 +291,7 @@ pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane], brush: Opti
     for (pane, rect) in panes.iter().zip(&pane_rects) {
         let clipped = painter.with_clip_rect(*rect);
         match pane.image {
-            Some((img, size)) => img.paint(&clipped, view, *rect, size),
+            Some((img, size)) => img.paint(&clipped, view, *rect, size, orientation),
             None => {
                 clipped.text(
                     rect.center(),
@@ -288,6 +330,11 @@ pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane], brush: Opti
     let controls = Rect::from_min_max(Pos2::new(area.min.x, views_rect.max.y), area.max);
     ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
         ui.horizontal_centered(|ui| controls_bar(ui, view, image_size, pane_rects[0].size(), ppp, brush.is_some()));
+    });
+    // Report the pointer in stored-image coordinates.
+    let hovered = hovered.zip(stored_size).map(|(d, s)| {
+        let (x, y) = orientation.to_image((d.x, d.y), (s.x, s.y));
+        Vec2::new(x, y)
     });
     ViewResponse { hovered, painting }
 }

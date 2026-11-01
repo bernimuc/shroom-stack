@@ -29,6 +29,9 @@ far are recorded as **A**.
 
 ## 1. Auto rotate
 
+**Status:** implemented (orientation from EXIF, per-stack override, display, thumbnails,
+brush and saved DNG); writing the override back to Lightroom comes with the plugin (5).
+
 **What the data offers:** cameras store an EXIF orientation (0/90/180/270°, mirrored
 variants are not used by cameras). It comes from the camera's orientation sensor, which
 is unreliable when shooting straight up/down – the cases mentioned in IDEAS.md.

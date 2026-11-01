@@ -162,6 +162,16 @@ mod tests {
     }
 
     #[test]
+    fn orientation_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rotated.dng");
+        let template = synthetic_template().with_orientation(crate::Orientation::Cw270);
+        write_linear_dng(&path, &gradient(6, 4), &template, "test").unwrap();
+        assert_eq!(crate::io::read_frame_info(&path).unwrap().orientation, crate::Orientation::Cw270);
+        assert_eq!(load_linear(&path).unwrap().template.orientation(), crate::Orientation::Cw270);
+    }
+
+    #[test]
     fn out_of_range_values_are_clipped() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("clip.dng");

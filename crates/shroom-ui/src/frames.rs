@@ -182,6 +182,12 @@ pub fn preflight(list: &FrameList, memory: Option<u64>) -> Vec<Issue> {
         if infos.iter().any(|(_, i)| i.camera != first.camera) {
             issues.push(Issue::warning("The images come from different cameras."));
         }
+        if infos.iter().any(|(_, i)| i.orientation != first.orientation) {
+            issues.push(Issue::warning(
+                "The images have different orientations. The stack uses the first image's orientation; \
+                 use Rotate left/right to change it.",
+            ));
+        }
         let needed = estimated_memory(first.width, first.height);
         if let Some(total) = memory
             && needed > total / 4 * 3
@@ -223,6 +229,7 @@ mod tests {
             height: 100,
             preview: None,
             color: Default::default(),
+            orientation: Default::default(),
         }
     }
 
@@ -318,9 +325,14 @@ mod tests {
             ("c", "2026-01-01 10:00:02", 10, "C"),
         ]);
         let issues = preflight(&mixed, None);
+        assert!(!has(&issues, Severity::Warning, "orientations"));
         assert!(has(&issues, Severity::Error, "b is 12×100"));
         assert!(has(&issues, Severity::Warning, "different cameras"));
         assert!(has(&issues, Severity::Warning, "shooting order"));
+
+        let mut rotated = list(&[("a", "2026-01-01 10:00:01", 10, "C"), ("b", "2026-01-01 10:00:02", 10, "C")]);
+        rotated.frames[1].info.as_mut().unwrap().orientation = shroom_core::Orientation::Cw90;
+        assert!(has(&preflight(&rotated, None), Severity::Warning, "different orientations"));
 
         let mut loading = list(&[("a", "2026-01-01 10:00:01", 10, "C")]);
         loading.add(["x".into()]);
