@@ -3729,6 +3729,7 @@ dependencies = [
  "chrono",
  "eframe",
  "egui_kittest",
+ "pollster 0.4.0",
  "rfd",
  "shroom-core",
 ]

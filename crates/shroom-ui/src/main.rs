@@ -1,6 +1,7 @@
 //! Shroom Stack desktop application.
 
 mod app;
+mod dialogs;
 mod frames;
 mod loader;
 mod processing;

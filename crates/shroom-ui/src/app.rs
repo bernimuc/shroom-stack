@@ -11,6 +11,7 @@ use shroom_core::render::{ColorInfo, render_depth_map, render_display};
 use shroom_core::retouch::{Brush, Retouch};
 use shroom_core::stack::{Method, Progress, StackSettings, Stage};
 
+use crate::dialogs::{Dialogs, Picked};
 use crate::frames::{FrameList, Issue, Severity, preflight};
 use crate::loader::{FullRequest, Loaded, Loader};
 use crate::processing::{Finished, Job, JobError, JobEvent, overall_progress};
@@ -125,6 +126,7 @@ pub struct ShroomApp {
     /// Show the depth/source map instead of the result in Postprocessing.
     show_map: bool,
     saving: Option<Receiver<Result<PathBuf, String>>>,
+    dialogs: Dialogs,
     loader: Loader,
 }
 
@@ -147,6 +149,7 @@ impl ShroomApp {
             brush: BrushTool { active: false, brush: Brush { radius: 60.0, softness: 0.5 }, source: None, last: None },
             show_map: false,
             saving: None,
+            dialogs: Dialogs::new(cc.egui_ctx.clone()),
             loader: Loader::new(cc.egui_ctx.clone()),
         };
         app.add_files(files);
@@ -253,6 +256,11 @@ impl ShroomApp {
             }
         }
         self.receive_job(ctx);
+        match self.dialogs.poll() {
+            Some(Picked::Open(paths)) if self.workspace == Workspace::Preparation => self.add_files(paths),
+            Some(Picked::Save(Some(path))) => self.save_to(path),
+            _ => {}
+        }
         if let Some(rx) = &self.saving
             && let Ok(result) = rx.try_recv()
         {
@@ -349,12 +357,8 @@ impl ShroomApp {
         let Some(done) = &self.done else { return };
         let first = &done.finished.paths[0];
         let name = format!("{}-stacked.dng", first.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default());
-        let mut dialog = rfd::FileDialog::new().add_filter("DNG", &["dng"]).set_file_name(name);
-        if let Some(dir) = first.parent() {
-            dialog = dialog.set_directory(dir);
-        }
-        let Some(path) = dialog.save_file() else { return };
-        self.save_to(path);
+        let directory = first.parent().map(|d| d.to_path_buf());
+        self.dialogs.save_dng(name, directory);
     }
 
     fn save_to(&mut self, path: PathBuf) {
@@ -539,7 +543,10 @@ impl ShroomApp {
                 .on_hover_text("Which frame each part of the result comes from (blue = first, red = last).");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 save = ui
-                    .add_enabled(self.saving.is_none(), egui::Button::new(RichText::new("Save…").strong()))
+                    .add_enabled(
+                        self.saving.is_none() && !self.dialogs.is_open(),
+                        egui::Button::new(RichText::new("Save…").strong()),
+                    )
                     .on_hover_text("Save the result as Linear DNG")
                     .clicked();
                 new_stack =
@@ -675,7 +682,6 @@ impl ShroomApp {
         self.done.as_ref().unwrap().retouch.image().pixel(x, y)
     }
 
-
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some(Confirm::DiscardResult) = self.confirm else { return };
         let mut answer = None;
@@ -715,10 +721,8 @@ impl ShroomApp {
         let processing = self.running.as_ref().and_then(|r| r.progress.map(|p| p.frame));
         ui.add_enabled_ui(editable, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Add images…").clicked()
-                    && let Some(paths) = rfd::FileDialog::new().add_filter("DNG", &["dng", "DNG"]).pick_files()
-                {
-                    self.add_files(paths);
+                if ui.add_enabled(!self.dialogs.is_open(), egui::Button::new("Add images…")).clicked() {
+                    self.dialogs.pick_dngs();
                 }
                 let has = self.selected.is_some();
                 if ui.add_enabled(has, egui::Button::new("Remove")).clicked() {
