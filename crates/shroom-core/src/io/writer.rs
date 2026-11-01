@@ -94,7 +94,9 @@ fn write_to(path: &Path, image: &RgbImage, template: &DngTemplate, software: &st
     dng.load_metadata(&template.metadata).map_err(enc_err)?;
     dng.root_ifd_mut()
         .add_tag(ExifTag::Orientation, raw.orientation.to_u16());
-    dng.root_ifd_mut().copy(template.root_tags.iter().map(|(t, v)| (t, v)));
+    // The source's own colour tags take precedence: rawler rounds matrices when writing.
+    dng.root_ifd_mut()
+        .copy_with_override(template.root_tags.iter().map(|(t, v)| (t, v)));
     dng.root_ifd_mut().add_tag(TiffCommonTag::Software, software);
     dng.root_ifd_mut().add_tag(
         ExifTag::ModifyDate,
@@ -151,6 +153,33 @@ mod tests {
             "{gm:?}"
         );
         assert_eq!(back.template.raw.clean_make, "Shroom");
+    }
+
+    #[test]
+    fn colour_profile_tags_are_copied_verbatim() {
+        use rawler::decoders::WellKnownIFD;
+        use rawler::formats::tiff::{SRational, Value};
+
+        const FORWARD_MATRIX_1: u16 = 50964;
+        const COLOR_MATRIX_2: u16 = 50722;
+        let forward = Value::SRational((1..=9).map(|n| SRational::new(n, 10_000)).collect());
+        // Deliberately not representable after rawler's own matrix rounding.
+        let color = Value::SRational(vec![SRational::new(-786, 10_000); 9]);
+        let mut template = synthetic_template();
+        template.root_tags = vec![(FORWARD_MATRIX_1, forward.clone()), (COLOR_MATRIX_2, color.clone())];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tags.dng");
+        write_linear_dng(&path, &gradient(4, 4), &template, "test").unwrap();
+
+        let source = rawler::rawsource::RawSource::new(&path).unwrap();
+        let root = rawler::get_decoder(&source)
+            .unwrap()
+            .ifd(WellKnownIFD::Root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.get_entry(FORWARD_MATRIX_1).map(|e| &e.value), Some(&forward));
+        assert_eq!(root.get_entry(COLOR_MATRIX_2).map(|e| &e.value), Some(&color));
     }
 
     #[test]

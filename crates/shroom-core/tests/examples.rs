@@ -88,6 +88,26 @@ fn raw_to_linear_dng_roundtrip() {
     assert!(max_err <= 1.0 / 65535.0, "max error {max_err}");
     assert!((back.color.wb[0] - frame.color.wb[0]).abs() < 1e-3);
 
+    // Colour calibration and camera profile must survive unchanged, or raw converters
+    // render different colours (missing ForwardMatrix → oversaturated in Lightroom).
+    let root = |p: &Path| {
+        let source = rawler::rawsource::RawSource::new(p).unwrap();
+        rawler::get_decoder(&source)
+            .unwrap()
+            .ifd(rawler::decoders::WellKnownIFD::Root)
+            .unwrap()
+            .unwrap()
+    };
+    let (src_root, out_root) = (root(&input), root(&out));
+    for tag in [
+        50721u16, 50722, 50723, 50724, 50727, 50728, 50730, 50778, 50779, 50931, 50932, 50936, 50937, 50938, 50939,
+        50964, 50965, 50981, 50982,
+    ] {
+        if let Some(src) = src_root.get_entry(tag) {
+            assert_eq!(out_root.get_entry(tag).map(|e| &e.value), Some(&src.value), "tag {tag}");
+        }
+    }
+
     let back_info = io::read_frame_info(&out).unwrap();
     assert_eq!(back_info.camera, info.camera);
     assert_eq!(back_info.capture_time, info.capture_time);

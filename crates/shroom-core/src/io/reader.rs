@@ -20,6 +20,42 @@ const KEPT_RAW_TAGS: [u16; 2] = [
     51041, // NoiseProfile
 ];
 
+/// Root IFD tags describing camera colour calibration and the embedded camera profile.
+/// They are copied verbatim so raw converters render the result exactly like the source;
+/// in particular the profile's hue/sat and look tables only give the intended colours
+/// together with the ForwardMatrix tags.
+const COLOR_ROOT_TAGS: &[u16] = &[
+    50721, 50722, // ColorMatrix1/2
+    50723, 50724, // CameraCalibration1/2
+    50725, 50726, // ReductionMatrix1/2
+    50727, // AnalogBalance
+    50728, // AsShotNeutral
+    50729, // AsShotWhiteXY
+    50730, // BaselineExposure
+    50731, // BaselineNoise
+    50732, // BaselineSharpness
+    50734, // LinearResponseLimit
+    50735, // CameraSerialNumber
+    50736, // LensInfo
+    50739, // ShadowScale
+    50778, 50779, // CalibrationIlluminant1/2
+    50879, // ColorimetricReference
+    50931, // CameraCalibrationSignature
+    50932, // ProfileCalibrationSignature
+    50936, 50937, 50938, 50939, 50940, 50941, 50942, // ProfileName … ProfileCopyright
+    50964, 50965, // ForwardMatrix1/2
+    50981, 50982, // ProfileLookTableDims/Data
+    51041, // NoiseProfile
+    51107, 51108, // ProfileHueSatMapEncoding, ProfileLookTableEncoding
+    51109, // BaselineExposureOffset
+    51110, // DefaultBlackRender
+    52525, // ProfileGainTableMap
+    52529, 52530, 52531, 52532, 52533, 52534, 52535, // third illuminant, IlluminantData1-3
+    52537, 52538, // ProfileHueSatMapData3, ReductionMatrix3
+    52543, // RGBTables
+    52551, 52552, // ProfileDynamicRange, ProfileGroupName
+];
+
 /// Everything from a source file needed to write a result DNG with the same camera,
 /// colour calibration and EXIF data. Opaque to users of the crate.
 #[derive(Clone)]
@@ -151,7 +187,12 @@ fn decode_full(path: &Path) -> Result<(RawImage, DngTemplate)> {
             })
             .unwrap_or_default())
     };
-    let root_tags = ifd_tags(WellKnownIFD::VirtualDngRootTags, &|_| true)?;
+    let mut root_tags = ifd_tags(WellKnownIFD::Root, &|t| COLOR_ROOT_TAGS.contains(&t))?;
+    for (tag, value) in ifd_tags(WellKnownIFD::VirtualDngRootTags, &|_| true)? {
+        if !root_tags.iter().any(|(t, _)| *t == tag) {
+            root_tags.push((tag, value));
+        }
+    }
     let raw_tags = ifd_tags(WellKnownIFD::VirtualDngRawTags, &|t| KEPT_RAW_TAGS.contains(&t))?;
     let data = std::mem::replace(&mut raw.data, RawImageData::Integer(Vec::new()));
     let template = DngTemplate {
