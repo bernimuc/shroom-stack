@@ -178,9 +178,17 @@ impl ShroomApp {
         self.running.as_ref().is_some_and(|r| r.frame.is_some() && r.map.is_some())
     }
 
+    /// Adds DNG files; folders are searched (one level deep).
     fn add_files(&mut self, paths: Vec<PathBuf>) {
-        let dngs = paths.into_iter().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dng")));
-        for path in self.frames.add(dngs) {
+        let (dngs, skipped) = crate::frames::collect_dngs(paths);
+        let added = self.frames.add(dngs);
+        self.status = match (added.is_empty(), skipped) {
+            (true, 0) => None,
+            (true, n) => Some((true, format!("No DNG files added ({n} other files ignored; only DNG is supported)."))),
+            (false, 0) => None,
+            (false, n) => Some((false, format!("{n} files ignored: only DNG is supported."))),
+        };
+        for path in added {
             self.loader.request_info(path);
         }
         if self.selected.is_none() && !self.frames.frames.is_empty() {
@@ -331,7 +339,7 @@ impl ShroomApp {
 
     /// Runs the preflight checks and starts stacking if they pass.
     fn render(&mut self, ctx: &egui::Context) {
-        let issues = preflight(&self.frames);
+        let issues = preflight(&self.frames, crate::frames::total_memory());
         let ok = issues.iter().all(|i| i.severity != Severity::Error);
         self.issues = Some(issues);
         self.status = None;
@@ -724,6 +732,17 @@ impl ShroomApp {
                 if ui.add_enabled(!self.dialogs.is_open(), egui::Button::new("Add images…")).clicked() {
                     self.dialogs.pick_dngs();
                 }
+                if ui
+                    .add_enabled(!self.frames.frames.is_empty(), egui::Button::new("Clear"))
+                    .on_hover_text("Remove all images")
+                    .clicked()
+                {
+                    self.frames.clear();
+                    self.full = None;
+                    self.issues = None;
+                    self.status = None;
+                    self.select(None);
+                }
                 let has = self.selected.is_some();
                 if ui.add_enabled(has, egui::Button::new("Remove")).clicked() {
                     let i = self.selected.unwrap();
@@ -755,7 +774,9 @@ impl ShroomApp {
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             if self.frames.frames.is_empty() {
                 ui.add_space(20.0);
-                ui.vertical_centered(|ui| ui.label(RichText::new("Add DNG files or drop them here.").weak()));
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new("Add DNG files or drop files or a folder here.").weak())
+                });
             }
             for (i, frame) in self.frames.frames.iter().enumerate() {
                 let selected = match processing {

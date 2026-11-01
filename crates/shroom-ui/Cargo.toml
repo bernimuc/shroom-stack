@@ -14,6 +14,9 @@ eframe = "0.37"
 pollster = "0.4"
 rfd = "0.17"
 shroom-core.workspace = true
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["wgpu", "eframe", "snapshot"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+tempfile = "3"

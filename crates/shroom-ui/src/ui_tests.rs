@@ -17,6 +17,7 @@ fn render_without_images_reports_error() {
     let mut h = harness(Vec::new());
     h.run();
     h.get_by_label_contains("Add DNG files");
+    assert!(h.query_by_label("Clear").is_some());
     h.get_by_label("Render").click();
     h.run();
     h.get_by_label_contains("At least two images");

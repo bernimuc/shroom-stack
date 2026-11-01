@@ -20,6 +20,36 @@ impl Frame {
     }
 }
 
+fn is_dng(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dng"))
+}
+
+/// Expands folders (one level) and keeps DNG files; returns them and the number of files
+/// skipped because they are not DNGs.
+pub fn collect_dngs(paths: impl IntoIterator<Item = PathBuf>) -> (Vec<PathBuf>, usize) {
+    let (mut dngs, mut skipped) = (Vec::new(), 0);
+    for path in paths {
+        if path.is_dir() {
+            let mut entries: Vec<PathBuf> = std::fs::read_dir(&path)
+                .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_file()).collect())
+                .unwrap_or_default();
+            entries.sort();
+            for entry in entries {
+                if is_dng(&entry) {
+                    dngs.push(entry);
+                } else if !entry.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+                    skipped += 1;
+                }
+            }
+        } else if is_dng(&path) {
+            dngs.push(path);
+        } else {
+            skipped += 1;
+        }
+    }
+    (dngs, skipped)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct FrameList {
     pub frames: Vec<Frame>,
@@ -59,6 +89,10 @@ impl FrameList {
         let frame = self.frames.remove(index);
         self.frames.insert(target, frame);
         target
+    }
+
+    pub fn clear(&mut self) {
+        self.frames.clear();
     }
 
     pub fn reverse(&mut self) {
@@ -101,8 +135,26 @@ impl Issue {
     }
 }
 
-/// Checks whether the frames can be stacked.
-pub fn preflight(list: &FrameList) -> Vec<Issue> {
+/// Approximate peak memory of stacking and showing the result, per image pixel. Measured
+/// on the examples (≈6.4 GB for 47 MP on the GPU path) plus the result view and brush
+/// source in the UI. Independent of the number of frames, since stacking streams them.
+const BYTES_PER_PIXEL: u64 = 180;
+
+/// Memory needed to stack frames of `width × height` pixels.
+pub fn estimated_memory(width: usize, height: usize) -> u64 {
+    BYTES_PER_PIXEL * (width * height) as u64
+}
+
+/// Installed memory in bytes, if it can be determined.
+pub fn total_memory() -> Option<u64> {
+    let sys = sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
+    );
+    sys.ok().map(|s| s.total_memory()).filter(|m| *m > 0)
+}
+
+/// Checks whether the frames can be stacked. `memory` is the installed memory in bytes.
+pub fn preflight(list: &FrameList, memory: Option<u64>) -> Vec<Issue> {
     let mut issues = Vec::new();
     if list.frames.len() < 2 {
         issues.push(Issue::error("At least two images are needed for stacking."));
@@ -129,6 +181,18 @@ pub fn preflight(list: &FrameList) -> Vec<Issue> {
         }
         if infos.iter().any(|(_, i)| i.camera != first.camera) {
             issues.push(Issue::warning("The images come from different cameras."));
+        }
+        let needed = estimated_memory(first.width, first.height);
+        if let Some(total) = memory
+            && needed > total / 4 * 3
+        {
+            let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
+            issues.push(Issue::warning(format!(
+                "Stacking images of this size needs about {:.0} GB of memory; this computer has {:.0} GB. \
+                 It may become very slow.",
+                gb(needed),
+                gb(total)
+            )));
         }
     }
     let times: Vec<_> = infos.iter().map(|(_, i)| i.capture_time).collect();
@@ -185,6 +249,18 @@ mod tests {
     }
 
     #[test]
+    fn collects_dngs_from_files_and_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["b.DNG", "a.dng", "notes.txt", ".DS_Store"] {
+            std::fs::write(dir.path().join(name), b"").unwrap();
+        }
+        let (dngs, skipped) = collect_dngs([dir.path().to_path_buf(), PathBuf::from("x.dng"), PathBuf::from("y.jpg")]);
+        let names: Vec<_> = dngs.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["a.dng", "b.DNG", "x.dng"]);
+        assert_eq!(skipped, 2, "notes.txt and y.jpg; hidden files are ignored silently");
+    }
+
+    #[test]
     fn reorder_operations() {
         let mut l = list(&[
             ("a", "2026-01-01 10:00:03", 10, "C"),
@@ -201,15 +277,31 @@ mod tests {
         assert_eq!(names(&l), ["b", "c", "a"]);
         l.remove(0);
         assert_eq!(names(&l), ["c", "a"]);
+        l.clear();
+        assert!(l.frames.is_empty());
     }
 
     #[test]
     fn preflight_accepts_good_stack() {
         let l = list(&[("a", "2026-01-01 10:00:01", 10, "C"), ("b", "2026-01-01 10:00:02", 10, "C")]);
-        assert!(preflight(&l).is_empty());
+        assert!(preflight(&l, None).is_empty());
         // Reverse shooting order is fine too (focus from far to near).
         let l = list(&[("a", "2026-01-01 10:00:02", 10, "C"), ("b", "2026-01-01 10:00:01", 10, "C")]);
-        assert!(preflight(&l).is_empty());
+        assert!(preflight(&l, None).is_empty());
+    }
+
+    #[test]
+    fn preflight_warns_about_memory() {
+        let mut l = list(&[("a", "2026-01-01 10:00:01", 10, "C"), ("b", "2026-01-01 10:00:02", 10, "C")]);
+        assert!(preflight(&l, Some(1 << 30)).is_empty());
+        for f in &mut l.frames {
+            let info = f.info.as_mut().unwrap();
+            (info.width, info.height) = (8352, 5586);
+        }
+        let issues = preflight(&l, Some(8 << 30));
+        assert!(issues.iter().any(|i| i.severity == Severity::Warning && i.message.contains("8 GB")), "{issues:?}");
+        assert!(preflight(&l, Some(24 << 30)).is_empty());
+        assert!(total_memory().is_some_and(|m| m > 1 << 30));
     }
 
     #[test]
@@ -218,22 +310,22 @@ mod tests {
             issues.iter().any(|i| i.severity == sev && i.message.contains(text))
         };
         let one = list(&[("a", "2026-01-01 10:00:01", 10, "C")]);
-        assert!(has(&preflight(&one), Severity::Error, "At least two"));
+        assert!(has(&preflight(&one, None), Severity::Error, "At least two"));
 
         let mixed = list(&[
             ("a", "2026-01-01 10:00:01", 10, "C"),
             ("b", "2026-01-01 10:00:03", 12, "D"),
             ("c", "2026-01-01 10:00:02", 10, "C"),
         ]);
-        let issues = preflight(&mixed);
+        let issues = preflight(&mixed, None);
         assert!(has(&issues, Severity::Error, "b is 12×100"));
         assert!(has(&issues, Severity::Warning, "different cameras"));
         assert!(has(&issues, Severity::Warning, "shooting order"));
 
         let mut loading = list(&[("a", "2026-01-01 10:00:01", 10, "C")]);
         loading.add(["x".into()]);
-        assert!(has(&preflight(&loading), Severity::Error, "still being loaded"));
+        assert!(has(&preflight(&loading, None), Severity::Error, "still being loaded"));
         loading.set_info(Path::new("x"), Err("broken".into()));
-        assert!(has(&preflight(&loading), Severity::Error, "x cannot be read: broken"));
+        assert!(has(&preflight(&loading, None), Severity::Error, "x cannot be read: broken"));
     }
 }
