@@ -12,6 +12,7 @@ mod image;
 pub mod io;
 pub mod raw;
 pub mod render;
+pub mod retouch;
 pub mod stack;
 
 #[cfg(test)]

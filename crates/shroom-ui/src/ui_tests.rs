@@ -105,6 +105,26 @@ fn stack_through_ui() {
     h.get_by_label("Show depth map").click();
     h.run();
     h.render().unwrap().save(out.join("postprocessing_map.png")).unwrap();
+    h.get_by_label("Show depth map").click();
+    h.run();
+
+    // Retouch: paint a stroke from the last frame into the result, then undo it.
+    h.state_mut().select_for_test(4);
+    step_until(&mut h, "brush source", |a| a.is_idle());
+    let before = h.state().result_pixel(3000, 2300);
+    h.get_by_label("Brush").click();
+    h.run();
+    assert!(h.state_mut().paint_for_test(&[(2600.0, 2000.0), (3000.0, 2300.0), (3600.0, 2600.0)]));
+    h.run();
+    let painted = h.state().result_pixel(3000, 2300);
+    assert_ne!(before, painted, "stroke should change the result");
+    h.render().unwrap().save(out.join("retouch.png")).unwrap();
+    h.get_by_label("Undo").click();
+    h.run();
+    assert_eq!(h.state().result_pixel(3000, 2300), before);
+    h.get_by_label("Redo").click();
+    h.run();
+    assert_eq!(h.state().result_pixel(3000, 2300), painted);
 
     let saved = std::env::temp_dir().join("shroom-ui-test.dng");
     let _ = std::fs::remove_file(&saved);

@@ -9,7 +9,7 @@ use eframe::egui;
 use shroom_core::align::{Affine, warp_rgb};
 use shroom_core::io::{self, FrameInfo};
 use shroom_core::render::render_display;
-use shroom_core::{DisplayImage, Rect};
+use shroom_core::{DisplayImage, Rect, RgbImage};
 
 /// A full-resolution rendering of an input frame.
 #[derive(Clone, Debug, PartialEq)]
@@ -19,9 +19,15 @@ pub struct FullRequest {
     pub aligned: Option<(Affine, Rect)>,
 }
 
+/// A rendered frame; for aligned requests also the linear image (the brush source).
+pub struct FullImage {
+    pub display: DisplayImage,
+    pub linear: Option<Arc<RgbImage>>,
+}
+
 pub enum Loaded {
     Info(PathBuf, Result<FrameInfo, String>),
-    Full(FullRequest, Result<DisplayImage, String>),
+    Full(FullRequest, Result<FullImage, String>),
 }
 
 pub struct Loader {
@@ -70,12 +76,15 @@ impl Loader {
                 };
                 let Some(request) = next else { break };
                 let result = io::load_linear(&request.path)
-                    .map(|frame| {
-                        let image = match &request.aligned {
-                            Some((t, crop)) => warp_rgb(&frame.image, t, *crop),
-                            None => frame.image,
-                        };
-                        render_display(&image, &frame.color, None)
+                    .map(|frame| match &request.aligned {
+                        Some((t, crop)) => {
+                            let image = warp_rgb(&frame.image, t, *crop);
+                            FullImage {
+                                display: render_display(&image, &frame.color, None),
+                                linear: Some(Arc::new(image)),
+                            }
+                        }
+                        None => FullImage { display: render_display(&frame.image, &frame.color, None), linear: None },
                     })
                     .map_err(|e| e.to_string());
                 let _ = tx.send(Loaded::Full(request, result));

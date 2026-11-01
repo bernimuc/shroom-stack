@@ -102,6 +102,28 @@ impl TiledImage {
         Self { tiles, size: Vec2::new(img.width as f32, img.height as f32) }
     }
 
+    /// Replaces the pixels at `(x, y)` (texture pixels) with `img`.
+    pub fn update(&mut self, x: usize, y: usize, img: &DisplayImage) {
+        let patch = Rect::from_min_size(Pos2::new(x as f32, y as f32), Vec2::new(img.width as f32, img.height as f32));
+        for (rect, texture) in &mut self.tiles {
+            let overlap = rect.intersect(patch);
+            if overlap.width() <= 0.0 || overlap.height() <= 0.0 {
+                continue;
+            }
+            let (ox, oy) = ((overlap.min.x - patch.min.x) as usize, (overlap.min.y - patch.min.y) as usize);
+            let (w, h) = (overlap.width() as usize, overlap.height() as usize);
+            let mut rgba = Vec::with_capacity(w * h * 4);
+            for row in oy..oy + h {
+                let start = (row * img.width + ox) * 3;
+                for px in img.data[start..start + w * 3].chunks(3) {
+                    rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                }
+            }
+            let pos = [(overlap.min.x - rect.min.x) as usize, (overlap.min.y - rect.min.y) as usize];
+            texture.set_partial(pos, egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba), TextureOptions::LINEAR);
+        }
+    }
+
     /// The texture and its size, if the image fits into a single tile.
     pub fn single(&self) -> Option<(&TextureHandle, Vec2)> {
         match self.tiles.as_slice() {
@@ -134,9 +156,18 @@ pub struct Pane<'a> {
     pub placeholder: &'a str,
 }
 
+/// What happened in the view this frame.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ViewResponse {
+    /// Image position under the pointer.
+    pub hovered: Option<Vec2>,
+    /// The primary button is held over the image (and the view is not being panned).
+    pub painting: bool,
+}
+
 /// Shows one or more panes side by side with shared zoom/pan, plus the zoom controls.
-/// Returns the hovered image position, if any.
-pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane]) -> Option<Vec2> {
+/// `brush` (radius in image pixels) draws a brush outline at the pointer in every pane.
+pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane], brush: Option<f32>) -> ViewResponse {
     let ppp = ui.ctx().pixels_per_point();
     let image_size = panes.iter().find_map(|p| p.image.map(|(_, s)| s));
     let controls_height = 28.0;
@@ -172,6 +203,11 @@ pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane]) -> Option<V
     if panning && response.dragged() {
         view.pan(response.drag_delta());
     }
+    let painting =
+        hovered.is_some() && !panning && ui.input(|i| i.pointer.primary_down()) && response.is_pointer_button_down_on();
+    if brush.is_some() && hovered.is_some() && !panning {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
     if let Some(size) = image_size {
         view.update(pane_rects[0].size(), size, ppp);
     }
@@ -206,13 +242,22 @@ pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane]) -> Option<V
     for rect in pane_rects.iter().skip(1) {
         painter.vline(rect.min.x, rect.y_range(), egui::Stroke::new(1.0, Color32::from_gray(90)));
     }
+    if let (Some(radius), Some(pos)) = (brush, hovered) {
+        for rect in &pane_rects {
+            let centre = view.image_to_screen(*rect, pos);
+            let clipped = painter.with_clip_rect(*rect);
+            let r = radius * view.zoom;
+            clipped.circle_stroke(centre, r, egui::Stroke::new(2.5, Color32::from_black_alpha(160)));
+            clipped.circle_stroke(centre, r, egui::Stroke::new(1.0, Color32::WHITE));
+        }
+    }
 
     // Controls below the panes.
     let controls = Rect::from_min_max(Pos2::new(area.min.x, views_rect.max.y), area.max);
     ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
         ui.horizontal_centered(|ui| controls_bar(ui, view, image_size, pane_rects[0].size(), ppp));
     });
-    hovered
+    ViewResponse { hovered, painting }
 }
 
 fn controls_bar(ui: &mut egui::Ui, view: &mut ViewState, image: Option<Vec2>, pane: Vec2, ppp: f32) {

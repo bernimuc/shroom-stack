@@ -145,7 +145,7 @@ Each milestone ends with tests green and something runnable.
 | 4 ✅ | GPU | wgpu compute for demosaic, warp, focus measure, pyramid; CPU vs GPU equality tests; benchmarks on Stack 1 (34 × 47 MP) |
 | 5 ✅ | UI shell + Preparation | egui app, file list w/ thumbnails, preview widget with zoom/pan, toolbar, preflight check |
 | 6 ✅ | Processing workspace | worker thread, progress, live split view, cancel |
-| 7 | Postprocessing | ~~result split view, save dialog~~ (done in 6), brush retouching with undo |
+| 7 ✅ | Postprocessing | ~~result split view, save dialog~~ (done in 6), brush retouching with undo |
 | 8 | Polish | performance, memory limits, error handling, app bundle/icon |
 
 Tests: unit tests per module with small synthetic images (generated in
@@ -273,3 +273,15 @@ Notes from milestone 6 (Processing workspace):
   asks before discarding the result.
 * End-to-end UI tests on Stack 3 (`cargo test --release -p shroom-ui -- --ignored`):
   stacking, live view, saving, discard dialog, cancelling.
+
+Notes from milestone 7 (brush retouching):
+
+* Core `retouch`: strokes of dabs with a soft round brush (size, softness); within a
+  stroke each pixel keeps its highest coverage (no build-up); touched 64 px tiles are
+  stored before/after, so undo/redo is exact and memory grows with the painted area.
+* UI: "Brush" (B) in Postprocessing paints the selected input frame (aligned to the
+  result) into the result, in either pane and at any zoom; brush outline in both panes;
+  Size (`[`/`]`), Softness; Undo/Redo (Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z). Only the painted
+  area of the result texture is re-rendered. Saving writes the retouched image.
+* Not verified interactively (no desktop control in this session): the feel of real
+  mouse strokes; tests drive strokes through the same code path programmatically.

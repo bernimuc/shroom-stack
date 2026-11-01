@@ -2,10 +2,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use eframe::egui::{self, Color32, RichText, Vec2};
-use shroom_core::render::render_depth_map;
+use shroom_core::RgbImage;
+use shroom_core::render::{ColorInfo, render_depth_map, render_display};
+use shroom_core::retouch::{Brush, Retouch};
 use shroom_core::stack::{Method, Progress, StackSettings, Stage};
 
 use crate::frames::{FrameList, Issue, Severity, preflight};
@@ -70,8 +73,29 @@ struct Running {
 /// A finished stack shown in Postprocessing.
 struct Done {
     finished: Box<Finished>,
+    /// The result image (moved out of `finished`) with its retouching history.
+    retouch: Retouch,
+    color: ColorInfo,
     image: TiledImage,
     map: TiledImage,
+}
+
+impl Done {
+    /// Re-renders `rect` of the result into its texture after retouching.
+    fn refresh(&mut self, rect: shroom_core::Rect) {
+        let patch = render_display(&self.retouch.image().crop(rect), &self.color, None);
+        self.image.update(rect.x, rect.y, &patch);
+    }
+}
+
+/// Brush settings and the stroke in progress.
+struct BrushTool {
+    active: bool,
+    brush: Brush,
+    /// Aligned linear image of the frame painted from.
+    source: Option<(PathBuf, Arc<RgbImage>)>,
+    /// Position of the previous dab of the current stroke.
+    last: Option<(f32, f32)>,
 }
 
 /// Questions that need a confirmation before results are discarded.
@@ -97,6 +121,7 @@ pub struct ShroomApp {
     running: Option<Running>,
     done: Option<Done>,
     confirm: Option<Confirm>,
+    brush: BrushTool,
     /// Show the depth/source map instead of the result in Postprocessing.
     show_map: bool,
     saving: Option<Receiver<Result<PathBuf, String>>>,
@@ -119,6 +144,7 @@ impl ShroomApp {
             running: None,
             done: None,
             confirm: None,
+            brush: BrushTool { active: false, brush: Brush { radius: 60.0, softness: 0.5 }, source: None, last: None },
             show_map: false,
             saving: None,
             loader: Loader::new(cc.egui_ctx.clone()),
@@ -182,7 +208,7 @@ impl ShroomApp {
                     Some(a) => (a.transforms[i], a.crop),
                     None => (
                         shroom_core::align::Affine::IDENTITY,
-                        shroom_core::Rect::new(0, 0, result.image.width(), result.image.height()),
+                        shroom_core::Rect::new(0, 0, done.retouch.image().width(), done.retouch.image().height()),
                     ),
                 })
             }
@@ -218,7 +244,10 @@ impl ShroomApp {
                 }
                 Loaded::Full(request, Ok(img)) if Some(&request) == self.full_request().as_ref() => {
                     let name = format!("full:{}", request.path.display());
-                    self.full = Some((request, TiledImage::new(ctx, &name, &img)));
+                    if let Some(linear) = img.linear {
+                        self.brush.source = Some((request.path.clone(), linear));
+                    }
+                    self.full = Some((request, TiledImage::new(ctx, &name, &img.display)));
                 }
                 Loaded::Full(..) => {}
             }
@@ -257,8 +286,11 @@ impl ShroomApp {
                 JobEvent::Done(outcome) => {
                     self.running = None;
                     match outcome {
-                        Ok(finished) => {
+                        Ok(mut finished) => {
                             let image = TiledImage::new(ctx, "result", &finished.display);
+                            let result = std::mem::replace(&mut finished.result.image, RgbImage::new(0, 0));
+                            let color =
+                                self.frames.frames[0].info.as_ref().map(|i| i.color.clone()).unwrap_or_default();
                             let map = render_depth_map(&finished.result.depth_map, max_index, Some(2048));
                             let map = TiledImage::new(ctx, "result:map", &map);
                             self.status = Some((
@@ -270,7 +302,8 @@ impl ShroomApp {
                                     finished.result.backend
                                 ),
                             ));
-                            self.done = Some(Done { finished, image, map });
+                            self.done = Some(Done { finished, retouch: Retouch::new(result), color, image, map });
+                            self.brush.source = None;
                             self.set_workspace(Workspace::Postprocessing);
                         }
                         Err(JobError::Cancelled) => {
@@ -326,7 +359,7 @@ impl ShroomApp {
 
     fn save_to(&mut self, path: PathBuf) {
         let Some(done) = &self.done else { return };
-        let (image, template) = (done.finished.result.image.clone(), done.finished.template.clone());
+        let (image, template) = (done.retouch.image().clone(), done.finished.template.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let software = concat!("Shroom Stack ", env!("CARGO_PKG_VERSION"));
@@ -499,10 +532,10 @@ impl ShroomApp {
                 Method::DepthMap { radius, smoothing } => format!("Depth map (radius {radius}, smoothing {smoothing})"),
                 Method::Pyramid { smoothing } => format!("Pyramid (smoothing {smoothing})"),
             };
-            let img = &done.finished.result.image;
+            let img = done.retouch.image();
             ui.label(format!("{method} · {} images · {}×{}", done.finished.paths.len(), img.width(), img.height()));
             ui.separator();
-            ui.checkbox(&mut self.show_map, "Show depth map")
+            ui.add_enabled(!self.brush.active, egui::Checkbox::new(&mut self.show_map, "Show depth map"))
                 .on_hover_text("Which frame each part of the result comes from (blue = first, red = last).");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 save = ui
@@ -513,6 +546,7 @@ impl ShroomApp {
                     ui.button("New stack").on_hover_text("Back to Preparation (discards this result)").clicked();
             });
         });
+        self.brush_toolbar(ui);
         if save {
             self.save();
         }
@@ -521,13 +555,137 @@ impl ShroomApp {
         }
     }
 
+    fn brush_toolbar(&mut self, ui: &mut egui::Ui) {
+        let Some(done) = &mut self.done else { return };
+        let (mut undo, mut redo) = (false, false);
+        ui.horizontal(|ui| {
+            let tool = &mut self.brush;
+            if ui
+                .selectable_label(tool.active, "Brush")
+                .on_hover_text("Paint the selected input frame into the result (B)")
+                .clicked()
+            {
+                tool.active = !tool.active;
+            }
+            ui.add_enabled_ui(tool.active, |ui| {
+                ui.label("Size");
+                ui.add(egui::Slider::new(&mut tool.brush.radius, 2.0..=600.0).logarithmic(true).suffix(" px"))
+                    .on_hover_text("Brush radius in image pixels ([ and ] change it)");
+                ui.label("Softness");
+                ui.add(egui::Slider::new(&mut tool.brush.softness, 0.0..=1.0))
+                    .on_hover_text("0 = hard edge, 1 = soft fall-off");
+            });
+            ui.separator();
+            undo = ui
+                .add_enabled(done.retouch.can_undo(), egui::Button::new("Undo"))
+                .on_hover_text("Cmd/Ctrl+Z")
+                .clicked();
+            redo = ui
+                .add_enabled(done.retouch.can_redo(), egui::Button::new("Redo"))
+                .on_hover_text("Shift+Cmd/Ctrl+Z")
+                .clicked();
+            if tool.active {
+                let hint = match self.selected.and_then(|i| self.frames.frames.get(i)) {
+                    None => "Select the frame to paint from in the list.".to_string(),
+                    Some(f) if tool.source.as_ref().is_some_and(|(p, _)| *p == f.path) => {
+                        format!("Painting from {}. Space+drag pans.", f.file_name())
+                    }
+                    Some(f) => format!("Loading {}…", f.file_name()),
+                };
+                ui.label(RichText::new(hint).weak());
+            }
+        });
+        if self.brush.active {
+            self.show_map = false;
+        }
+        // Keyboard shortcuts (Shift+Cmd+Z must be checked before Cmd+Z).
+        let ctx = ui.ctx().clone();
+        if self.confirm.is_none() && !ctx.egui_wants_keyboard_input() {
+            redo |= ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z));
+            undo |= ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
+            ctx.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::B) {
+                    self.brush.active = !self.brush.active;
+                }
+                let r = &mut self.brush.brush.radius;
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::OpenBracket) {
+                    *r = (*r / 1.25).max(2.0);
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::CloseBracket) {
+                    *r = (*r * 1.25).min(600.0);
+                }
+            });
+        }
+        if undo && let Some(rect) = done.retouch.undo() {
+            self.brush.last = None;
+            done.refresh(rect);
+        }
+        if redo && let Some(rect) = done.retouch.redo() {
+            done.refresh(rect);
+        }
+    }
+
+    /// Applies brush input from the view to the result.
+    fn paint(&mut self, response: viewer::ViewResponse) {
+        let Some(done) = &mut self.done else { return };
+        let tool = &mut self.brush;
+        let selected = self.selected.and_then(|i| self.frames.frames.get(i)).map(|f| &f.path);
+        let source = tool.source.as_ref().filter(|(p, _)| Some(p) == selected).map(|(_, s)| s.clone());
+        match (tool.active, source, response.painting, response.hovered) {
+            (true, Some(source), true, Some(pos)) => {
+                let p = (pos.x, pos.y);
+                let changed = match tool.last {
+                    None => done.retouch.dab(&source, p.0, p.1, tool.brush),
+                    Some(last) => done.retouch.line(&source, last, p, tool.brush),
+                };
+                tool.last = Some(p);
+                if let Some(rect) = changed {
+                    done.refresh(rect);
+                }
+            }
+            _ => {
+                if tool.last.take().is_some() {
+                    done.retouch.end_stroke();
+                }
+            }
+        }
+    }
+
+    /// Paints a stroke through the given image positions (for tests).
+    #[cfg(test)]
+    pub fn paint_for_test(&mut self, points: &[(f32, f32)]) -> bool {
+        if self.brush.source.is_none() {
+            return false;
+        }
+        self.brush.active = true;
+        for &(x, y) in points {
+            self.paint(viewer::ViewResponse { hovered: Some(Vec2::new(x, y)), painting: true });
+        }
+        self.paint(viewer::ViewResponse::default());
+        true
+    }
+
+    #[cfg(test)]
+    pub fn select_for_test(&mut self, index: usize) {
+        self.select(Some(index));
+    }
+
+    #[cfg(test)]
+    pub fn result_pixel(&self, x: usize, y: usize) -> [f32; 3] {
+        self.done.as_ref().unwrap().retouch.image().pixel(x, y)
+    }
+
+
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some(Confirm::DiscardResult) = self.confirm else { return };
         let mut answer = None;
         let modal = egui::Modal::new(egui::Id::unique("confirm-discard")).show(ctx, |ui| {
             ui.set_width(360.0);
             ui.heading("Discard the result?");
-            ui.label("Going back to Preparation discards the stacked image. Save it first if you want to keep it.");
+            ui.label(
+                "Going back to Preparation discards the stacked image and its retouching. Save it first if you \
+                 want to keep it.",
+            );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Discard").clicked() {
@@ -694,7 +852,7 @@ impl ShroomApp {
         };
         let placeholder = if frame.is_some() { "Loading…" } else { "No image selected" };
         let mut view = self.view;
-        viewer::show(ui, &mut view, &[Pane { label: &label, image, placeholder }]);
+        viewer::show(ui, &mut view, &[Pane { label: &label, image, placeholder }], None);
         self.view = view;
     }
 
@@ -717,13 +875,13 @@ impl ShroomApp {
             },
         ];
         let mut view = self.view;
-        viewer::show(ui, &mut view, &panes);
+        viewer::show(ui, &mut view, &panes, None);
         self.view = view;
     }
 
     fn postprocessing_preview(&mut self, ui: &mut egui::Ui) {
         let Some(done) = &self.done else { return };
-        let img = &done.finished.result.image;
+        let img = done.retouch.image();
         let size = Vec2::new(img.width() as f32, img.height() as f32);
         let frame = self.selected.and_then(|i| self.frames.frames.get(i));
         let left_label = frame.map(|f| format!("{} (aligned)", f.file_name())).unwrap_or_default();
@@ -736,8 +894,10 @@ impl ShroomApp {
                 Pane { label: "Result", image: Some((&done.image, size)), placeholder: "" }
             },
         ];
+        let brush = self.brush.active.then_some(self.brush.brush.radius);
         let mut view = self.view;
-        viewer::show(ui, &mut view, &panes);
+        let response = viewer::show(ui, &mut view, &panes, brush);
         self.view = view;
+        self.paint(response);
     }
 }
