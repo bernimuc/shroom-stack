@@ -140,7 +140,7 @@ Each milestone ends with tests green and something runnable.
 |---|---|---|
 | 0 ✅ | Setup | rustup toolchain, cargo workspace, CI‑style `cargo test`/`clippy`/`fmt`, `.gitignore` |
 | 1 ✅ | DNG I/O | read metadata + embedded preview + CFA data; demosaic; write Linear DNG; round‑trip tests; open result in Lightroom (pending manual check) |
-| 2 | CLI stacker (CPU) | `shroom-cli` for fast iteration: both methods on CPU, compare visually with Helicon outputs |
+| 2 ✅ | CLI stacker (CPU) | `shroom-cli` for fast iteration: both methods on CPU, compare visually with Helicon outputs |
 | 3 | Alignment | transform estimation, warp, crop; synthetic tests (known transform) |
 | 4 | GPU | wgpu compute for demosaic, warp, focus measure, pyramid; CPU vs GPU equality tests; benchmarks on Stack 1 (34 × 47 MP) |
 | 5 | UI shell + Preparation | egui app, file list w/ thumbnails, preview widget with zoom/pan, toolbar, preflight check |
@@ -185,3 +185,11 @@ Notes from milestone 1:
   applied in previews; all example files are unrotated.
 * rawler truncates colour matrix values to 1/10000 when writing (e.g. −0.0786 →
   −0.0785); negligible.
+
+Notes from milestone 2:
+
+* Both stackers stream over the frames (depth map: 2 passes, pyramid: 1 pass).
+  Stack 3 (20 × 33 MP) on M5 CPU: ~7 s, 2.4 GB (depth map) / 3.3 GB (pyramid) peak.
+* Without alignment the example stacks show strong radial ghosting: focus breathing
+  scales the image by ~2–3 % across the stack. Alignment (milestone 3) is required
+  before results can be compared with Helicon.

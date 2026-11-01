@@ -8,6 +8,10 @@ pub enum Error {
     Decode { path: PathBuf, message: String },
     #[error("unsupported image {path}: {message}")]
     Unsupported { path: PathBuf, message: String },
+    #[error("{0}")]
+    InvalidInput(String),
+    #[error("cancelled")]
+    Cancelled,
     #[error("cannot write {path}: {message}")]
     Encode { path: PathBuf, message: String },
 }

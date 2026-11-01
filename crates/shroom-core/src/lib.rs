@@ -4,10 +4,12 @@
 //! underlying raw decoder leaks into the public API.
 
 mod error;
+pub mod filter;
 mod image;
 pub mod io;
 pub mod raw;
 pub mod render;
+pub mod stack;
 
 pub use error::{Error, Result};
 pub use image::{DisplayImage, Plane, Rect, RgbImage};

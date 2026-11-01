@@ -3,7 +3,7 @@
 
 use rayon::prelude::*;
 
-use crate::image::{DisplayImage, RgbImage};
+use crate::image::{DisplayImage, Plane, RgbImage};
 
 /// Colour information of a camera image needed for display rendering.
 #[derive(Clone, Debug, PartialEq)]
@@ -86,6 +86,40 @@ pub fn render_display(image: &RgbImage, color: &ColorInfo, max_size: Option<usiz
     }
 }
 
+/// Renders a depth map (frame index per pixel, `0..=max_index`) in false colour: blue for
+/// the first frame through green to red for the last. Downscales like [`render_display`].
+pub fn render_depth_map(depth: &Plane, max_index: f32, max_size: Option<usize>) -> DisplayImage {
+    let factor = max_size
+        .map(|m| depth.width().max(depth.height()).div_ceil(m.max(1)))
+        .unwrap_or(1)
+        .max(1);
+    let (w, h) = (depth.width() / factor, depth.height() / factor);
+    let mut data = vec![0u8; w * h * 3];
+    data.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let t = depth.get(x * factor, y * factor) / max_index.max(f32::EPSILON);
+            row[x * 3..x * 3 + 3].copy_from_slice(&false_colour(t));
+        }
+    });
+    DisplayImage {
+        width: w,
+        height: h,
+        data,
+    }
+}
+
+/// Blue → cyan → green → yellow → red for `t` in `0..=1`.
+fn false_colour(t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0) * 4.0;
+    let (r, g, b) = match t {
+        t if t < 1.0 => (0.0, t, 1.0),
+        t if t < 2.0 => (0.0, 1.0, 2.0 - t),
+        t if t < 3.0 => (t - 2.0, 1.0, 0.0),
+        t => (1.0, 4.0 - t, 0.0),
+    };
+    [r, g, b].map(|v| (v * 255.0 + 0.5) as u8)
+}
+
 /// sRGB transfer function; input is clamped to `0..=1`.
 pub fn srgb_encode(v: f32) -> f32 {
     let v = v.clamp(0.0, 1.0);
@@ -163,6 +197,15 @@ mod tests {
         for v in out {
             assert!((v - 1.0).abs() < 1e-4, "camera neutral must map to sRGB white");
         }
+    }
+
+    #[test]
+    fn depth_map_colours() {
+        let depth = Plane::from_vec(3, 1, vec![0.0, 2.0, 4.0]);
+        let d = render_depth_map(&depth, 4.0, None);
+        assert_eq!(&d.data[0..3], &[0, 0, 255]);
+        assert_eq!(&d.data[3..6], &[0, 255, 0]);
+        assert_eq!(&d.data[6..9], &[255, 0, 0]);
     }
 
     #[test]
