@@ -1,6 +1,6 @@
 # Shroom Stack – Roadmap for the ideas in IDEAS.md
 
-Status: **agreed plan**; features 1–3 are implemented. Each feature has a feasibility
+Status: **agreed plan**; features 1–4 are implemented. Each feature has a feasibility
 rating, a proposed approach, dependencies and open questions (marked **Q**). Answers so
 far are recorded as **A**.
 
@@ -168,6 +168,22 @@ retouch brush enough, or is the mask brush wanted as well?
 **A:** the retouch brush is enough for now; revisit after trying soft bokeh.
 
 ## 4. Stack management
+
+**Status:** implemented in the app (workspace "Session", batch rendering, session file
+`Shroom Stack session.json`); colour labels and keywords follow with the plugin
+(feature 5), which reads the session file. Differences from the plan below:
+- Boundary evidence: pause relative to the 5 pauses on each side, changed camera, size,
+  aperture, focal length (strong), orientation (medium), exposure time or ISO (weak, may
+  follow the light in auto modes), and changed picture (embedded previews reduced to a
+  32×24 grid, where focus differences vanish). The session-wide split into short and long
+  pauses was dropped: in mixed sessions every pause of a manual stack looks long next to
+  bracketed stacks.
+- No focus distance in the EXIF of the example files, and rawler doesn't expose Canon's
+  maker notes, so a bracketing sequence marker is not used.
+- Stacking results (Linear DNGs, ours or Helicon's) in a folder are recognised and not
+  grouped. The session file is written after grouping and after every edit; reopening
+  keeps the stored grouping and groups photos added since automatically.
+- Batch results are numbered (`-stacked-2.dng`) instead of overwriting.
 
 **Shooting practice (A):** mostly in-camera focus bracketing, some manual stacks (manual
 focus lens); 10–60 frames per stack. Rule: setting up a new stack always takes longer

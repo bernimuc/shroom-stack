@@ -33,6 +33,15 @@ On Linux the usual windowing libraries are needed (e.g. on Debian/Ubuntu:
 
 ## Using the app
 
+0. **Session** (optional): "Open folder…" (or drop a folder) groups its photos into
+   stacks, using pauses between shots, changed camera settings and changed pictures.
+   Uncertain boundaries are marked "Check: new stack?" with the reasons. Right-click a
+   thumbnail to start a new stack there, move photos to the previous or next stack, or
+   exclude them; "Merge with previous" joins stacks. **Open** loads a stack into
+   Preparation; **Render selected** stacks the checked stacks one after another with the
+   chosen method and saves each result next to its originals (`<first photo>-stacked.dng`,
+   never overwriting). The grouping is kept in `Shroom Stack session.json` in the folder
+   and restored when it is opened again; stacking results in the folder are not listed.
 1. **Preparation:** add raw files ("Add images…", drag & drop of files or a folder).
    They are sorted by capture time; reorder with Up/Down/Reverse if needed. Choose the
    method and parameters (optionally **Soft bokeh** with its source frame and

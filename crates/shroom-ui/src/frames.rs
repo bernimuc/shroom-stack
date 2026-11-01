@@ -246,6 +246,8 @@ mod tests {
             color: Default::default(),
             orientation: Default::default(),
             camera_values_known: true,
+            mosaic: true,
+            exposure: Default::default(),
         }
     }
 

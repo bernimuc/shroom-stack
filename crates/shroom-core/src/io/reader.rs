@@ -158,7 +158,20 @@ pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
         color: color_info(&raw),
         orientation: crate::Orientation::from_exif(raw.orientation.to_u16()),
         camera_values_known,
+        mosaic: matches!(raw.photometric, RawPhotometricInterpretation::Cfa(_)),
+        exposure: exposure(&metadata),
     })
+}
+
+fn exposure(metadata: &RawMetadata) -> super::Exposure {
+    let e = &metadata.exif;
+    let ratio = |r: &rawler::formats::tiff::Rational| (r.d != 0).then(|| r.n as f32 / r.d as f32);
+    super::Exposure {
+        time: e.exposure_time.as_ref().and_then(ratio),
+        f_number: e.fnumber.as_ref().and_then(ratio),
+        iso: e.iso_speed.or(e.iso_speed_ratings.map(u32::from)),
+        focal_length: e.focal_length.as_ref().and_then(ratio),
+    }
 }
 
 fn capture_time(metadata: &RawMetadata) -> Option<NaiveDateTime> {

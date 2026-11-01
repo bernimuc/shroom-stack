@@ -54,6 +54,23 @@ impl Loader {
         });
     }
 
+    /// Reads the information of many files with one worker per CPU core.
+    pub fn request_infos(&self, paths: Vec<PathBuf>) {
+        let paths = Arc::new(paths);
+        let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).min(paths.len());
+        for _ in 0..workers {
+            let (tx, ctx, paths, next) = (self.tx.clone(), self.ctx.clone(), paths.clone(), next.clone());
+            std::thread::spawn(move || {
+                while let Some(path) = paths.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+                    let result = io::read_frame_info(path).map_err(|e| e.to_string());
+                    let _ = tx.send(Loaded::Info(path.clone(), result));
+                    ctx.request_repaint();
+                }
+            });
+        }
+    }
+
     /// Requests a full-resolution rendering; only the latest request is served.
     pub fn request_full(&self, request: FullRequest) {
         *self.wanted_full.lock().unwrap() = Some(request);

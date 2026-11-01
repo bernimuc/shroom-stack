@@ -1,10 +1,12 @@
 //! Shroom Stack desktop application.
 
 mod app;
+mod batch;
 mod dialogs;
 mod frames;
 mod loader;
 mod processing;
+mod session_view;
 mod viewer;
 
 #[cfg(test)]

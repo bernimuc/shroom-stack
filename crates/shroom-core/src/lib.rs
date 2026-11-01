@@ -13,6 +13,7 @@ pub mod io;
 pub mod raw;
 pub mod render;
 pub mod retouch;
+pub mod session;
 pub mod stack;
 
 #[cfg(test)]

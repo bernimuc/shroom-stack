@@ -49,6 +49,20 @@ pub struct FrameInfo {
     /// Whether Adobe's calibration values for this camera are known (always for DNGs);
     /// without them results from raw files look darker in Lightroom.
     pub camera_values_known: bool,
+    /// Bayer raw data; false for Linear DNGs such as stacking results.
+    pub mosaic: bool,
+    pub exposure: Exposure,
+}
+
+/// Camera settings of a shot, as far as recorded.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Exposure {
+    /// Exposure time in seconds.
+    pub time: Option<f32>,
+    pub f_number: Option<f32>,
+    pub iso: Option<u32>,
+    /// Focal length in millimetres.
+    pub focal_length: Option<f32>,
 }
 
 /// Reads metadata and the embedded preview without decoding the raw image data.
@@ -78,6 +92,8 @@ mod tests {
             color: Default::default(),
             orientation: Default::default(),
             camera_values_known: true,
+            mosaic: true,
+            exposure: Default::default(),
         }
     }
 

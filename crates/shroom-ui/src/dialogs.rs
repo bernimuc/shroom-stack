@@ -15,6 +15,8 @@ pub enum Picked {
     Open(Vec<PathBuf>),
     /// Where to save the result, if not cancelled.
     Save(Option<PathBuf>),
+    /// Folder to open as a session, if not cancelled.
+    Folder(Option<PathBuf>),
 }
 
 pub struct Dialogs {
@@ -42,6 +44,12 @@ impl Dialogs {
                 .pick_files()
                 .await;
             Picked::Open(files.unwrap_or_default().iter().map(|f| f.path().to_path_buf()).collect())
+        });
+    }
+
+    pub fn pick_folder(&mut self) {
+        self.spawn(|| async {
+            Picked::Folder(rfd::AsyncFileDialog::new().pick_folder().await.map(|f| f.path().to_path_buf()))
         });
     }
 

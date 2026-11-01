@@ -211,3 +211,45 @@ fn cr3_matches_lightroom_dng() {
     };
     assert_eq!(lens_model, "RF35mm F1.8 MACRO IS STM");
 }
+
+/// All example stacks as one session: grouped back into the original stacks, with
+/// consecutive previews recognised as the same picture. Results are not photos.
+#[test]
+#[ignore]
+fn example_stacks_are_grouped() {
+    use shroom_core::session::{Shot, analyse_gaps, stack_starts};
+    let mut frames = Vec::new();
+    let mut expected = Vec::new();
+    for stack in stacks() {
+        let files = dngs(&stack);
+        for result in files.iter().filter(|p| is_helicon(p)) {
+            assert!(!io::read_frame_info(result).unwrap().mosaic, "{}", result.display());
+        }
+        expected.push(frames.len());
+        frames.extend(files.iter().filter(|p| !is_helicon(p)).map(|p| io::read_frame_info(p).unwrap()));
+    }
+    if frames.is_empty() {
+        return;
+    }
+    assert!(frames.iter().all(|f| f.mosaic && f.exposure.f_number.is_some()));
+    io::sort_frames(&mut frames);
+    let shots: Vec<Shot> = frames.iter().map(Shot::from_info).collect();
+    let gaps = analyse_gaps(&shots);
+    let mut starts = stack_starts(&gaps);
+    starts.sort();
+    // The stacks were shot on different days, in a different order than their names.
+    let mut sizes: Vec<usize> =
+        starts.windows(2).map(|w| w[1] - w[0]).chain([frames.len() - starts.last().unwrap()]).collect();
+    let mut expected_sizes: Vec<usize> =
+        expected.windows(2).map(|w| w[1] - w[0]).chain([frames.len() - expected.last().unwrap()]).collect();
+    sizes.sort();
+    expected_sizes.sort();
+    assert_eq!(sizes, expected_sizes);
+    for (i, gap) in gaps.iter().enumerate() {
+        if !starts.contains(&(i + 1)) {
+            assert!(gap.boundary < 0.2, "gap after {}: {} {:?}", frames[i].file_name, gap.boundary, gap.reasons);
+            let (a, b) = (shots[i].signature.as_ref().unwrap(), shots[i + 1].signature.as_ref().unwrap());
+            assert!(a.similarity(b) > 0.9, "{}: {}", frames[i].file_name, a.similarity(b));
+        }
+    }
+}

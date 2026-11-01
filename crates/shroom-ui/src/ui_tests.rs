@@ -323,3 +323,104 @@ fn soft_bokeh_stack() {
     h.run();
     h.render().unwrap().save(out.join("soft_bokeh.png")).unwrap();
 }
+
+#[test]
+fn session_without_folder_explains_itself() {
+    let mut h = harness(Vec::new());
+    h.run();
+    h.get_by_label("Session").click();
+    h.run();
+    assert_eq!(h.state().workspace(), Workspace::Session);
+    h.get_by_label_contains("Open a folder");
+    assert!(h.query_by_label("Open folder…").is_some());
+    assert!(h.query_by_label("Add images…").is_none());
+}
+
+/// A folder with Stack 4, the first six frames of Stack 2 and a Helicon result (linked,
+/// not copied): grouped into two stacks, edited, restored on reopening, and the second
+/// stack rendered in a batch. Writes a screenshot to `target/ui-screenshots/`.
+#[test]
+#[ignore]
+fn session_groups_edits_and_renders() {
+    use shroom_core::session::{SESSION_FILE_NAME, SessionFile};
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let raw = |stack: &str| -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(examples.join(stack))
+            .map(|rd| rd.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        files.sort();
+        files
+    };
+    let (stack4, stack2) = (raw("Stack 4"), raw("Stack 2"));
+    if stack4.is_empty() || stack2.is_empty() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let helicon = stack4.iter().find(|p| p.to_string_lossy().contains('(')).unwrap();
+    let photos4: Vec<&PathBuf> = stack4.iter().filter(|p| !p.to_string_lossy().contains('(')).collect();
+    let photos2: Vec<&PathBuf> = stack2.iter().filter(|p| !p.to_string_lossy().contains('(')).take(6).collect();
+    for file in photos4.iter().chain(&photos2).copied().chain([helicon]) {
+        std::os::unix::fs::symlink(file, dir.path().join(file.file_name().unwrap())).unwrap();
+    }
+
+    let mut h = harness(Vec::new());
+    h.run();
+    h.get_by_label("Session").click();
+    h.state_mut().open_folder_for_test(dir.path().to_path_buf());
+    step_until(&mut h, "grouping", |a| a.is_idle());
+    let sizes: Vec<usize> = h.state_mut().session().stacks().iter().map(|s| s.frames.len()).collect();
+    let mut sorted = sizes.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec![6, photos4.len()]);
+    h.get_by_label_contains("stacking results not listed");
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-screenshots");
+    std::fs::create_dir_all(&out).unwrap();
+    h.render().unwrap().save(out.join("session.png")).unwrap();
+
+    // Splitting the six-frame stack is written to the session file and survives reopening.
+    let small = sizes.iter().position(|&n| n == 6).unwrap();
+    h.state_mut().session().edit_for_test((small, 3));
+    h.run();
+    let file = SessionFile::load(dir.path()).unwrap().unwrap();
+    assert_eq!(file.stacks.len(), 3);
+    h.state_mut().open_folder_for_test(dir.path().to_path_buf());
+    step_until(&mut h, "reopening", |a| a.is_idle());
+    let reopened: Vec<usize> = h.state_mut().session().stacks().iter().map(|s| s.frames.len()).collect();
+    assert_eq!(reopened.iter().filter(|&&n| n == 3).count(), 2, "{reopened:?}");
+
+    let three = reopened.iter().position(|&n| n == 3).unwrap();
+    assert_eq!(h.query_all_by_label("Open").count(), 3);
+
+    // Batch: check all, then uncheck all but one three-frame stack in the UI.
+    h.state_mut().session().check_all_for_test();
+    h.run();
+    h.get_by_label("Render selected (3)");
+    for i in (0..3).filter(|&i| i != three) {
+        h.get_by_label(&format!("Stack {}", i + 1)).click();
+        h.run();
+    }
+    h.get_by_label("Render selected (1)").click();
+    h.run();
+    step_until(&mut h, "batch", |a| a.is_idle());
+    let message = h.state_mut().session().message.clone();
+    assert!(message.as_ref().is_some_and(|(e, m)| !e && m.contains("Saved 1 results")), "{message:?}");
+    let first = h.state_mut().session().stacks()[three].frames[0].clone();
+    let result = dir.path().join(format!("{}-stacked.dng", first.file_stem().unwrap().to_string_lossy()));
+    assert!(result.exists(), "{}", result.display());
+    let file = SessionFile::load(dir.path()).unwrap().unwrap();
+    assert!(file.stacks.iter().any(|s| s.result.is_some()));
+    assert!(dir.path().join(SESSION_FILE_NAME).exists());
+
+    // The result is not listed as a photo when the folder is reopened.
+    h.state_mut().open_folder_for_test(dir.path().to_path_buf());
+    step_until(&mut h, "reopening", |a| a.is_idle());
+    h.get_by_label_contains("2 stacking results not listed");
+
+    // Opening a stack loads it into Preparation.
+    h.query_all_by_label("Open").next().unwrap().click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().workspace(), Workspace::Preparation);
+    step_until(&mut h, "files", |a| a.is_idle());
+    assert!(h.state().frame_count() >= 3);
+}

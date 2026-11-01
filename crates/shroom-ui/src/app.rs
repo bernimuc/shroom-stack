@@ -15,6 +15,7 @@ use crate::dialogs::{Dialogs, Picked};
 use crate::frames::{FrameList, Issue, Severity, preflight};
 use crate::loader::{FullRequest, Loaded, Loader};
 use crate::processing::{Finished, Job, JobError, JobEvent, overall_progress};
+use crate::session_view::{Action, SessionView};
 use crate::viewer::{self, Pane, TiledImage, ViewState};
 
 const ERROR_COLOR: Color32 = Color32::from_rgb(255, 110, 110);
@@ -22,6 +23,7 @@ const WARNING_COLOR: Color32 = Color32::from_rgb(240, 200, 90);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Workspace {
+    Session,
     Preparation,
     Processing,
     Postprocessing,
@@ -61,6 +63,15 @@ impl Default for Parameters {
 }
 
 impl Parameters {
+    fn settings(&self) -> StackSettings {
+        StackSettings {
+            method: self.method(),
+            align: self.align,
+            use_gpu: true,
+            bokeh: self.bokeh.then_some(self.bokeh_settings),
+        }
+    }
+
     fn method(&self) -> Method {
         match self.kind {
             MethodKind::DepthMap => Method::DepthMap { radius: self.radius, smoothing: self.depth_smoothing },
@@ -112,9 +123,10 @@ struct BrushTool {
 }
 
 /// Questions that need a confirmation before results are discarded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Confirm {
-    DiscardResult,
+    /// Discard the result and go to Preparation, there loading these frames if given.
+    DiscardResult { open: Option<Vec<PathBuf>> },
 }
 
 pub struct ShroomApp {
@@ -135,6 +147,7 @@ pub struct ShroomApp {
     done: Option<Done>,
     confirm: Option<Confirm>,
     brush: BrushTool,
+    session: SessionView,
     /// Show the depth/source map instead of the result in Postprocessing.
     show_map: bool,
     /// Tint the soft bokeh areas of the result.
@@ -163,6 +176,7 @@ impl ShroomApp {
             running: None,
             done: None,
             confirm: None,
+            session: SessionView::default(),
             brush: BrushTool { active: false, brush: Brush { radius: 60.0, softness: 0.5 }, source: None, last: None },
             show_map: false,
             show_bokeh: false,
@@ -181,10 +195,27 @@ impl ShroomApp {
     #[cfg(test)]
     pub fn is_idle(&self) -> bool {
         !self.frames.is_loading()
+            && !self.session.is_loading()
+            && !self.session.is_batch_running()
             && self.running.is_none()
             && self.saving.is_none()
             && (self.selected.is_none()
                 || self.full.as_ref().is_some_and(|(r, _)| Some(r) == self.full_request().as_ref()))
+    }
+
+    #[cfg(test)]
+    pub fn session(&mut self) -> &mut SessionView {
+        &mut self.session
+    }
+
+    #[cfg(test)]
+    pub fn open_folder_for_test(&mut self, folder: PathBuf) {
+        self.session.open(folder, &self.loader);
+    }
+
+    #[cfg(test)]
+    pub fn frame_count(&self) -> usize {
+        self.frames.frames.len()
     }
 
     #[cfg(test)]
@@ -272,6 +303,12 @@ impl ShroomApp {
         for loaded in self.loader.poll() {
             match loaded {
                 Loaded::Info(path, result) => {
+                    if self.session.wants(&path) {
+                        self.session.set_info(ctx, &path, result.clone());
+                    }
+                    if !self.frames.frames.iter().any(|f| f.path == path) {
+                        continue;
+                    }
                     if let Ok(info) = &result
                         && let Some(preview) = &info.preview
                     {
@@ -295,9 +332,11 @@ impl ShroomApp {
             }
         }
         self.receive_job(ctx);
+        self.session.poll_batch();
         match self.dialogs.poll() {
             Some(Picked::Open(paths)) if self.workspace == Workspace::Preparation => self.add_files(paths),
             Some(Picked::Save(Some(path))) => self.save_to(path),
+            Some(Picked::Folder(Some(folder))) => self.session.open(folder, &self.loader),
             _ => {}
         }
         if let Some(rx) = &self.saving
@@ -387,13 +426,7 @@ impl ShroomApp {
         if !ok {
             return;
         }
-        let p = &self.params;
-        let settings = StackSettings {
-            method: p.method(),
-            align: p.align,
-            use_gpu: true,
-            bokeh: p.bokeh.then_some(p.bokeh_settings),
-        };
+        let settings = self.params.settings();
         let color = self.frames.frames[0].info.as_ref().map(|i| i.color.clone()).unwrap_or_default();
         let paths = self.frames.frames.iter().map(|f| f.path.clone()).collect();
         self.running = Some(Running {
@@ -466,6 +499,20 @@ impl ShroomApp {
         self.orientation
     }
 
+    /// Loads the frames of a session stack into Preparation.
+    fn open_stack(&mut self, paths: Vec<PathBuf>) {
+        if self.done.is_some() {
+            self.confirm = Some(Confirm::DiscardResult { open: Some(paths) });
+            return;
+        }
+        self.frames.clear();
+        self.full = None;
+        self.orientation_manual = false;
+        self.select(None);
+        self.add_files(paths);
+        self.set_workspace(Workspace::Preparation);
+    }
+
     fn discard_result(&mut self) {
         self.done = None;
         self.status = None;
@@ -482,7 +529,15 @@ impl eframe::App for ShroomApp {
             i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
         });
         if !dropped.is_empty() && self.workspace == Workspace::Preparation {
-            self.add_files(dropped);
+            self.add_files(dropped.clone());
+        }
+        if let Some(path) = dropped.first()
+            && self.workspace == Workspace::Session
+        {
+            let folder = if path.is_dir() { Some(path.clone()) } else { path.parent().map(|p| p.to_path_buf()) };
+            if let Some(folder) = folder {
+                self.session.open(folder, &self.loader);
+            }
         }
         // Rotation shortcuts as in Lightroom.
         if self.workspace != Workspace::Processing && self.confirm.is_none() && !ctx.egui_wants_keyboard_input() {
@@ -501,11 +556,13 @@ impl eframe::App for ShroomApp {
         }
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        egui::Panel::left("files")
-            .resizable(true)
-            .default_size(320.0)
-            .min_size(220.0)
-            .show(ui, |ui| self.file_list(ui));
+        if self.workspace != Workspace::Session {
+            egui::Panel::left("files")
+                .resizable(true)
+                .default_size(320.0)
+                .min_size(220.0)
+                .show(ui, |ui| self.file_list(ui));
+        }
         egui::CentralPanel::default().show(ui, |ui| self.preview(ui));
         self.confirm_dialog(&ctx);
     }
@@ -518,20 +575,21 @@ impl ShroomApp {
             ui.heading("Shroom Stack");
             ui.separator();
             for (ws, label) in [
+                (Workspace::Session, "Session"),
                 (Workspace::Preparation, "Preparation"),
                 (Workspace::Processing, "Processing"),
                 (Workspace::Postprocessing, "Postprocessing"),
             ] {
                 // Preparation is left only by rendering; Postprocessing needs a result.
                 let enabled = match ws {
-                    Workspace::Preparation => self.running.is_none(),
+                    Workspace::Session | Workspace::Preparation => self.running.is_none(),
                     Workspace::Processing => self.running.is_some(),
                     Workspace::Postprocessing => self.done.is_some(),
                 };
                 ui.add_enabled_ui(enabled, |ui| {
                     if ui.selectable_label(self.workspace == ws, label).clicked() && self.workspace != ws {
                         if ws == Workspace::Preparation && self.done.is_some() {
-                            self.confirm = Some(Confirm::DiscardResult);
+                            self.confirm = Some(Confirm::DiscardResult { open: None });
                         } else {
                             self.set_workspace(ws);
                         }
@@ -541,19 +599,21 @@ impl ShroomApp {
         });
         ui.add_space(2.0);
         match self.workspace {
+            Workspace::Session => self.session_toolbar(ui),
             Workspace::Preparation => self.preparation_toolbar(ui),
             Workspace::Processing => self.processing_toolbar(ui),
             Workspace::Postprocessing => self.postprocessing_toolbar(ui),
         }
-        if let Some((error, message)) = &self.status {
+        let status = if self.workspace == Workspace::Session { &self.session.message } else { &self.status };
+        if let Some((error, message)) = status {
             ui.colored_label(if *error { ERROR_COLOR } else { Color32::LIGHT_GREEN }, message);
         }
         ui.add_space(4.0);
     }
 
-    fn preparation_toolbar(&mut self, ui: &mut egui::Ui) {
-        let mut render = false;
-        ui.horizontal(|ui| {
+    /// Method, parameters, alignment and soft bokeh, shared by Preparation and Session.
+    fn parameter_controls(&mut self, ui: &mut egui::Ui) {
+        {
             let method_label = ui.label("Method");
             let p = &mut self.params;
             egui::ComboBox::from_id_salt("method")
@@ -619,11 +679,22 @@ impl ShroomApp {
                 ui.add(egui::DragValue::new(&mut b.threshold).range(1..=10))
                     .on_hover_text("How much detail an area may have and still count as bokeh. Higher finds more.");
             }
+        }
+    }
+
+    fn preparation_toolbar(&mut self, ui: &mut egui::Ui) {
+        let mut render = false;
+        ui.horizontal(|ui| {
+            self.parameter_controls(ui);
             ui.separator();
             self.rotate_buttons(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 render = ui
-                    .add(egui::Button::new(RichText::new("Render").strong()).min_size(Vec2::new(90.0, 0.0)))
+                    .add_enabled(
+                        !self.session.is_batch_running(),
+                        egui::Button::new(RichText::new("Render").strong()).min_size(Vec2::new(90.0, 0.0)),
+                    )
+                    .on_disabled_hover_text("A batch is running in Session.")
                     .clicked();
             });
         });
@@ -638,6 +709,50 @@ impl ShroomApp {
                 };
                 ui.colored_label(color, format!("{kind}: {}", issue.message));
             }
+        }
+    }
+
+    fn session_toolbar(&mut self, ui: &mut egui::Ui) {
+        let mut render = false;
+        ui.horizontal(|ui| {
+            let busy = self.session.is_batch_running() || self.session.is_loading();
+            if ui.add_enabled(!busy && !self.dialogs.is_open(), egui::Button::new("Open folder…")).clicked() {
+                self.dialogs.pick_folder();
+            }
+            match self.session.folder() {
+                Some(folder) => ui.label(folder.display().to_string()),
+                None => ui.label(RichText::new("No folder").weak()),
+            };
+        });
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!self.session.is_batch_running(), |ui| self.parameter_controls(ui));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match self.session.batch_progress() {
+                    Some((fraction, text, cancelling)) => {
+                        if ui.add_enabled(!cancelling, egui::Button::new("Cancel")).clicked() {
+                            self.session.cancel_batch();
+                        }
+                        let text = if cancelling { "Cancelling…".to_string() } else { text };
+                        ui.add(egui::ProgressBar::new(fraction).text(text).desired_width(260.0));
+                    }
+                    None => {
+                        let n = self.session.checked_count();
+                        render = ui
+                            .add_enabled(
+                                n > 0 && self.running.is_none(),
+                                egui::Button::new(RichText::new(format!("Render selected ({n})")).strong()),
+                            )
+                            .on_hover_text(
+                                "Stack the checked stacks one after another; results are saved next to the originals.",
+                            )
+                            .clicked();
+                    }
+                }
+            });
+        });
+        if render {
+            let settings = self.params.settings();
+            self.session.start_batch(ui.ctx(), settings);
         }
     }
 
@@ -711,7 +826,7 @@ impl ShroomApp {
             self.save();
         }
         if new_stack {
-            self.confirm = Some(Confirm::DiscardResult);
+            self.confirm = Some(Confirm::DiscardResult { open: None });
         }
     }
 
@@ -836,7 +951,8 @@ impl ShroomApp {
     }
 
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
-        let Some(Confirm::DiscardResult) = self.confirm else { return };
+        let Some(Confirm::DiscardResult { open }) = &self.confirm else { return };
+        let open = open.clone();
         let mut answer = None;
         let modal = egui::Modal::new(egui::Id::unique("confirm-discard")).show(ctx, |ui| {
             ui.set_width(360.0);
@@ -862,6 +978,9 @@ impl ShroomApp {
             Some(true) => {
                 self.confirm = None;
                 self.discard_result();
+                if let Some(paths) = open {
+                    self.open_stack(paths);
+                }
             }
             Some(false) => self.confirm = None,
             None => {}
@@ -1002,6 +1121,11 @@ impl ShroomApp {
 
     fn preview(&mut self, ui: &mut egui::Ui) {
         match self.workspace {
+            Workspace::Session => {
+                if let Some(Action::OpenStack(paths)) = self.session.show(ui) {
+                    self.open_stack(paths);
+                }
+            }
             Workspace::Preparation => self.preparation_preview(ui),
             Workspace::Processing => self.processing_preview(ui),
             Workspace::Postprocessing => self.postprocessing_preview(ui),
