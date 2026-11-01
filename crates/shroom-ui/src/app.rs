@@ -168,6 +168,11 @@ impl ShroomApp {
     }
 
     #[cfg(test)]
+    pub fn view(&self) -> ViewState {
+        self.view
+    }
+
+    #[cfg(test)]
     pub fn workspace(&self) -> Workspace {
         self.workspace
     }

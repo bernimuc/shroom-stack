@@ -9,7 +9,11 @@ use egui_kittest::kittest::Queryable;
 use crate::app::{ShroomApp, Workspace};
 
 fn harness(files: Vec<PathBuf>) -> Harness<'static, ShroomApp> {
-    Harness::builder().with_size([1400.0, 900.0]).build_eframe(move |cc| ShroomApp::new(cc, files))
+    // Realistic frame time, so double-clicks (two clicks within 0.3 s) are recognised.
+    Harness::builder()
+        .with_size([1400.0, 900.0])
+        .with_step_dt(1.0 / 60.0)
+        .build_eframe(move |cc| ShroomApp::new(cc, files))
 }
 
 #[test]
@@ -57,9 +61,50 @@ fn screenshot_with_example_stack() {
     std::fs::create_dir_all(&out).unwrap();
     h.render().unwrap().save(out.join("preparation.png")).unwrap();
 
-    h.get_by_label("1:1").click();
+    // Double-click switches to 1:1, keeping the clicked point under the pointer…
+    let point = eframe::egui::Pos2::new(700.0, 400.0);
+    let double_click = |h: &mut Harness<'static, ShroomApp>| {
+        for _ in 0..2 {
+            h.drag_at(point);
+            h.step();
+            h.event(eframe::egui::Event::PointerButton {
+                pos: point,
+                button: eframe::egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            });
+            h.step();
+        }
+        h.run();
+    };
+    h.hover_at(point);
     h.run();
+    assert!(h.state().view().fit);
+    double_click(&mut h);
+    let view = h.state().view();
+    // The harness renders at one pixel per point, so 1:1 is zoom 1.
+    assert!(!view.fit && (view.zoom - 1.0).abs() < 0.02, "1:1 expected, zoom {}", view.zoom);
     h.render().unwrap().save(out.join("preparation_1to1.png")).unwrap();
+
+    // …dragging pans…
+    let before = h.state().view().center;
+    h.drag_at(point);
+    h.step();
+    for dx in [20.0, 60.0, 100.0] {
+        h.hover_at(point + eframe::egui::Vec2::new(dx, 0.0));
+        h.step();
+    }
+    h.drop_at(point + eframe::egui::Vec2::new(100.0, 0.0));
+    h.run();
+    let moved = before.x - h.state().view().center.x;
+    assert!(moved > 50.0, "panned by {moved} image pixels");
+
+    // …and a second double-click goes back to fit.
+    // (Half a second later, or egui would count it as part of a triple click.)
+    h.hover_at(point);
+    h.run_steps(30);
+    double_click(&mut h);
+    assert!(h.state().view().fit);
 
     h.get_by_label("Render").click();
     h.run();

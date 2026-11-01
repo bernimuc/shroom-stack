@@ -40,8 +40,9 @@ On Linux the usual windowing libraries are needed (e.g. on Debian/Ubuntu:
    map. **Brush** (B) paints the selected frame into the result; size `[` `]`, undo
    Cmd/Ctrl+Z, redo Shift+Cmd/Ctrl+Z. **Save…** writes a Linear DNG.
 
-Viewer: mouse wheel zooms at the cursor, Space+drag pans; Fit, 1:1, −, + and the slider
-are below the image.
+Viewer: mouse wheel zooms at the cursor, dragging pans (with the brush: Space+drag),
+double-click switches between fit and 1:1 at the clicked point; Fit, 1:1, −, + and the
+slider are below the image.
 
 ## Command line
 

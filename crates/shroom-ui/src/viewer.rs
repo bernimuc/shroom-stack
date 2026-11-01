@@ -55,6 +55,17 @@ impl ViewState {
         self.fit = false;
     }
 
+    /// Switches between fit and 1:1; zooming in keeps the image point at `anchor` (offset
+    /// from the pane centre) under the pointer.
+    pub fn toggle_one_to_one(&mut self, pixels_per_point: f32, anchor: Vec2) {
+        let one = Self::one_to_one(pixels_per_point);
+        if !self.fit && (self.zoom - one).abs() <= one * 0.01 {
+            self.fit = true;
+        } else {
+            self.zoom_to(one, anchor);
+        }
+    }
+
     pub fn pan(&mut self, screen_delta: Vec2) {
         self.center -= screen_delta / self.zoom;
         self.fit = false;
@@ -188,6 +199,17 @@ pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane], brush: Opti
     }
     let response = ui.allocate_rect(views_rect, Sense::click_and_drag());
     let mut hovered = None;
+    let pointer_pane = response
+        .hover_pos()
+        .map(|pos| (pos, pane_rects.iter().find(|r| r.contains(pos)).copied().unwrap_or(pane_rects[0])));
+    // Double-click toggles fit / 1:1 (not while painting, where clicks are dabs).
+    if image_size.is_some()
+        && brush.is_none()
+        && response.double_clicked()
+        && let Some((pos, pane)) = pointer_pane
+    {
+        view.toggle_one_to_one(ppp, pos - pane.center());
+    }
     if let (Some(size), Some(pos)) = (image_size, response.hover_pos()) {
         let pane = pane_rects.iter().find(|r| r.contains(pos)).copied().unwrap_or(pane_rects[0]);
         let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
@@ -199,14 +221,24 @@ pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane], brush: Opti
         }
         hovered = Some(view.screen_to_image(pane, pos));
     }
-    let panning = ui.input(|i| i.key_down(egui::Key::Space)) || response.dragged_by(egui::PointerButton::Middle);
-    if panning && response.dragged() {
+    // Dragging pans, except with the brush, where Space+drag or middle-drag pans.
+    let space = ui.input(|i| i.key_down(egui::Key::Space));
+    let pan_mode = brush.is_none() || space || response.dragged_by(egui::PointerButton::Middle);
+    if pan_mode && response.dragged() {
         view.pan(response.drag_delta());
     }
-    let painting =
-        hovered.is_some() && !panning && ui.input(|i| i.pointer.primary_down()) && response.is_pointer_button_down_on();
-    if brush.is_some() && hovered.is_some() && !panning {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    let painting = brush.is_some()
+        && hovered.is_some()
+        && !pan_mode
+        && ui.input(|i| i.pointer.primary_down())
+        && response.is_pointer_button_down_on();
+    if hovered.is_some() || response.dragged() {
+        let cursor = if pan_mode {
+            if response.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab }
+        } else {
+            egui::CursorIcon::Crosshair
+        };
+        ui.ctx().set_cursor_icon(cursor);
     }
     if let Some(size) = image_size {
         view.update(pane_rects[0].size(), size, ppp);
@@ -242,7 +274,7 @@ pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane], brush: Opti
     for rect in pane_rects.iter().skip(1) {
         painter.vline(rect.min.x, rect.y_range(), egui::Stroke::new(1.0, Color32::from_gray(90)));
     }
-    if let (Some(radius), Some(pos)) = (brush, hovered) {
+    if let (Some(radius), Some(pos), false) = (brush, hovered, pan_mode) {
         for rect in &pane_rects {
             let centre = view.image_to_screen(*rect, pos);
             let clipped = painter.with_clip_rect(*rect);
@@ -255,12 +287,12 @@ pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane], brush: Opti
     // Controls below the panes.
     let controls = Rect::from_min_max(Pos2::new(area.min.x, views_rect.max.y), area.max);
     ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
-        ui.horizontal_centered(|ui| controls_bar(ui, view, image_size, pane_rects[0].size(), ppp));
+        ui.horizontal_centered(|ui| controls_bar(ui, view, image_size, pane_rects[0].size(), ppp, brush.is_some()));
     });
     ViewResponse { hovered, painting }
 }
 
-fn controls_bar(ui: &mut egui::Ui, view: &mut ViewState, image: Option<Vec2>, pane: Vec2, ppp: f32) {
+fn controls_bar(ui: &mut egui::Ui, view: &mut ViewState, image: Option<Vec2>, pane: Vec2, ppp: f32, brush: bool) {
     let Some(image) = image else {
         ui.add_enabled(false, egui::Label::new("–"));
         return;
@@ -287,7 +319,12 @@ fn controls_bar(ui: &mut egui::Ui, view: &mut ViewState, image: Option<Vec2>, pa
     if slider.changed() {
         view.zoom_to((lo + t * (hi - lo)).exp(), Vec2::ZERO);
     }
-    ui.label(egui::RichText::new("Wheel: zoom · Space+drag: pan").weak());
+    let hint = if brush {
+        "Wheel: zoom · Space+drag: pan · Drag: paint"
+    } else {
+        "Wheel: zoom · Drag: pan · Double-click: fit / 1:1"
+    };
+    ui.label(egui::RichText::new(hint).weak());
 }
 
 #[cfg(test)]
@@ -322,6 +359,26 @@ mod tests {
         assert!((v.screen_to_image(pane, v.image_to_screen(pane, p)) - p).length() < 1e-3);
         v.pan(Vec2::new(10.0, -5.0));
         assert_eq!(v.center, Vec2::new(460.0, 520.0));
+    }
+
+    #[test]
+    fn double_click_toggles_fit_and_one_to_one() {
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
+        let mut v = ViewState::default();
+        v.update(pane.size(), Vec2::new(4000.0, 3000.0), 2.0);
+        // From fit: 1:1 with the clicked image point staying under the pointer.
+        let click = Pos2::new(300.0, 100.0);
+        let target = v.screen_to_image(pane, click);
+        v.toggle_one_to_one(2.0, click - pane.center());
+        assert_eq!(v.zoom, 0.5);
+        assert!((v.screen_to_image(pane, click) - target).length() < 1e-3);
+        // From 1:1: back to fit.
+        v.toggle_one_to_one(2.0, Vec2::ZERO);
+        assert!(v.fit);
+        // From another zoom level: to 1:1.
+        v = ViewState { zoom: 1.3, center: Vec2::new(10.0, 10.0), fit: false };
+        v.toggle_one_to_one(2.0, Vec2::ZERO);
+        assert_eq!(v.zoom, 0.5);
     }
 
     #[test]
