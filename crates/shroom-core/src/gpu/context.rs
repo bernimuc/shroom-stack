@@ -107,14 +107,13 @@ impl GpuContext {
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-        let mut entries = vec![wgpu::BindGroupEntry {
-            binding: 0,
-            resource: uniform.as_entire_binding(),
-        }];
-        entries.extend(buffers.iter().enumerate().map(|(i, b)| wgpu::BindGroupEntry {
-            binding: i as u32 + 1,
-            resource: b.as_entire_binding(),
-        }));
+        let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }];
+        entries.extend(
+            buffers
+                .iter()
+                .enumerate()
+                .map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32 + 1, resource: b.as_entire_binding() }),
+        );
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(name),
             layout: &pipeline.get_bind_group_layout(0),
@@ -185,9 +184,7 @@ impl GpuContext {
         self.queue.submit([encoder.finish()]);
         let slice = staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |r| r.expect("GPU buffer mapping failed"));
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("GPU poll failed");
+        self.device.poll(wgpu::PollType::wait_indefinitely()).expect("GPU poll failed");
         let view = slice.get_mapped_range().expect("GPU buffer not mapped");
         let data = bytemuck::cast_slice(&view).to_vec();
         drop(view);

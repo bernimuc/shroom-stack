@@ -111,11 +111,9 @@ fn refine(reference: &Plane, moving: &Plane, mut p: [f64; 4]) -> Result<[f64; 4]
                 let mut acc = [0.0f64; 15];
                 for x in 0..reference.width() {
                     let (wx, wy) = warp.apply(x as f64, y as f64);
-                    let (Some(iw), Some(dx), Some(dy)) = (
-                        sample_bilinear(moving, wx, wy),
-                        sample_bilinear(&gx, wx, wy),
-                        sample_bilinear(&gy, wx, wy),
-                    ) else {
+                    let (Some(iw), Some(dx), Some(dy)) =
+                        (sample_bilinear(moving, wx, wy), sample_bilinear(&gx, wx, wy), sample_bilinear(&gy, wx, wy))
+                    else {
                         continue;
                     };
                     let (u, v) = (x as f64 - c.0, y as f64 - c.1);
@@ -197,16 +195,8 @@ pub(crate) mod tests {
 
     /// Smooth, non-periodic analytic test scene.
     pub(crate) fn scene(x: f64, y: f64) -> f32 {
-        let blobs = [
-            (80.0, 60.0, 25.0),
-            (260.0, 200.0, 40.0),
-            (330.0, 70.0, 18.0),
-            (150.0, 230.0, 30.0),
-        ];
-        let b: f64 = blobs
-            .iter()
-            .map(|(cx, cy, r)| (-((x - cx).powi(2) + (y - cy).powi(2)) / (r * r)).exp())
-            .sum();
+        let blobs = [(80.0, 60.0, 25.0), (260.0, 200.0, 40.0), (330.0, 70.0, 18.0), (150.0, 230.0, 30.0)];
+        let b: f64 = blobs.iter().map(|(cx, cy, r)| (-((x - cx).powi(2) + (y - cy).powi(2)) / (r * r)).exp()).sum();
         (0.5 + 0.15 * (0.11 * x + 0.05 * y).sin() + 0.1 * (0.07 * x - 0.13 * y).cos() + 0.3 * b) as f32
     }
 
@@ -260,12 +250,7 @@ pub(crate) mod tests {
 
     #[test]
     fn solves_linear_system() {
-        let h = [
-            [4.0, 1.0, 0.0, 0.0],
-            [1.0, 3.0, 0.0, 1.0],
-            [0.0, 0.0, 2.0, 0.0],
-            [0.0, 1.0, 0.0, 5.0],
-        ];
+        let h = [[4.0, 1.0, 0.0, 0.0], [1.0, 3.0, 0.0, 1.0], [0.0, 0.0, 2.0, 0.0], [0.0, 1.0, 0.0, 5.0]];
         let x = [1.0, -2.0, 0.5, 3.0];
         let g: Vec<f64> = h.iter().map(|r| r.iter().zip(&x).map(|(a, b)| a * b).sum()).collect();
         let sol = solve4(h, [g[0], g[1], g[2], g[3]]).unwrap();

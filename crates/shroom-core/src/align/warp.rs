@@ -14,30 +14,24 @@ pub fn warp_rgb(src: &RgbImage, t: &Affine, rect: Rect) -> RgbImage {
     }
     let (sw, sh) = (src.width(), src.height());
     let mut out = RgbImage::new(rect.width, rect.height);
-    out.data_mut()
-        .par_chunks_mut(rect.width * 3)
-        .enumerate()
-        .for_each(|(y, row)| {
-            for x in 0..rect.width {
-                let (sx, sy) = t.apply((rect.x + x) as f64, (rect.y + y) as f64);
-                let (ix, iy) = (sx.floor() as isize, sy.floor() as isize);
-                let (wx, wy) = (
-                    cubic_weights((sx - ix as f64) as f32),
-                    cubic_weights((sy - iy as f64) as f32),
-                );
-                let mut acc = [0.0f32; 3];
-                for (j, wyj) in wy.iter().enumerate() {
-                    let yy = (iy + j as isize - 1).clamp(0, sh as isize - 1) as usize;
-                    for (i, wxi) in wx.iter().enumerate() {
-                        let xx = (ix + i as isize - 1).clamp(0, sw as isize - 1) as usize;
-                        let p = &src.data()[(yy * sw + xx) * 3..][..3];
-                        let w = wxi * wyj;
-                        acc.iter_mut().zip(p).for_each(|(a, v)| *a += w * v);
-                    }
+    out.data_mut().par_chunks_mut(rect.width * 3).enumerate().for_each(|(y, row)| {
+        for x in 0..rect.width {
+            let (sx, sy) = t.apply((rect.x + x) as f64, (rect.y + y) as f64);
+            let (ix, iy) = (sx.floor() as isize, sy.floor() as isize);
+            let (wx, wy) = (cubic_weights((sx - ix as f64) as f32), cubic_weights((sy - iy as f64) as f32));
+            let mut acc = [0.0f32; 3];
+            for (j, wyj) in wy.iter().enumerate() {
+                let yy = (iy + j as isize - 1).clamp(0, sh as isize - 1) as usize;
+                for (i, wxi) in wx.iter().enumerate() {
+                    let xx = (ix + i as isize - 1).clamp(0, sw as isize - 1) as usize;
+                    let p = &src.data()[(yy * sw + xx) * 3..][..3];
+                    let w = wxi * wyj;
+                    acc.iter_mut().zip(p).for_each(|(a, v)| *a += w * v);
                 }
-                row[x * 3..x * 3 + 3].copy_from_slice(&acc.map(|v| v.max(0.0)));
             }
-        });
+            row[x * 3..x * 3 + 3].copy_from_slice(&acc.map(|v| v.max(0.0)));
+        }
+    });
     out
 }
 
@@ -58,12 +52,7 @@ pub(super) fn sample_bilinear(p: &Plane, x: f64, y: f64) -> Option<f32> {
 /// Catmull–Rom weights for taps at offsets −1, 0, 1, 2 given fraction `t`.
 fn cubic_weights(t: f32) -> [f32; 4] {
     let (t2, t3) = (t * t, t * t * t);
-    [
-        0.5 * (-t3 + 2.0 * t2 - t),
-        0.5 * (3.0 * t3 - 5.0 * t2 + 2.0),
-        0.5 * (-3.0 * t3 + 4.0 * t2 + t),
-        0.5 * (t3 - t2),
-    ]
+    [0.5 * (-t3 + 2.0 * t2 - t), 0.5 * (3.0 * t3 - 5.0 * t2 + 2.0), 0.5 * (-3.0 * t3 + 4.0 * t2 + t), 0.5 * (t3 - t2)]
 }
 
 #[cfg(test)]
@@ -104,10 +93,7 @@ mod tests {
         for (x, y) in [(0, 0), (10, 13), (23, 23)] {
             let (sx, sy) = t.apply((8 + x) as f64, (8 + y) as f64);
             let p = out.pixel(x, y);
-            assert!(
-                (p[0] as f64 - sx).abs() < 1e-3 && (p[1] as f64 - sy).abs() < 1e-3,
-                "{p:?} vs {sx},{sy}"
-            );
+            assert!((p[0] as f64 - sx).abs() < 1e-3 && (p[1] as f64 - sy).abs() < 1e-3, "{p:?} vs {sx},{sy}");
         }
     }
 

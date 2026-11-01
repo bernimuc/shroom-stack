@@ -37,17 +37,14 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, radius: usize, smoothing: f32)
             }
             Some([best, sum, depth, _]) => b.argmax_update(best, sum, depth, &focus, i),
         }
+        let depth = state.as_ref().map(|[_, _, depth, _]| depth);
+        ctx.snapshot(Stage::Analysing, i, &frame, depth, i + 1 == n);
         Ok(())
     })?;
     let [best, sum, depth, brightness] = state.expect("at least two frames");
     let size = b.plane_size(&best);
 
-    let confidence = confidence(
-        &b.download_plane(&best),
-        &b.download_plane(&sum),
-        &b.download_plane(&brightness),
-        n,
-    );
+    let confidence = confidence(&b.download_plane(&best), &b.download_plane(&sum), &b.download_plane(&brightness), n);
     drop((best, sum, brightness));
     let (sigma, self_weight) = smoothing_params(radius, smoothing);
     let blur = |p: &Plane, sigma: f32| b.download_plane(&gaussian_blur(b, &b.upload_plane(p), sigma));
@@ -64,6 +61,7 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, radius: usize, smoothing: f32)
     let mut out = b.zeros_rgb(size.0, size.1);
     ctx.for_each_frame(Stage::Compositing, (0..n).filter(|&i| used[i]), |i, frame| {
         b.blend(&mut out, &frame, &depth_dev, i);
+        ctx.snapshot(Stage::Compositing, i, &frame, Some(&depth_dev), false);
         Ok(())
     })?;
     Ok((b.download_rgb(&out), depth))
@@ -142,12 +140,7 @@ fn smooth_depth(
     let weighted = Plane::from_vec(
         depth.width(),
         depth.height(),
-        depth
-            .data()
-            .par_iter()
-            .zip(conf.data().par_iter())
-            .map(|(d, c)| d * c)
-            .collect(),
+        depth.data().par_iter().zip(conf.data().par_iter()).map(|(d, c)| d * c).collect(),
     );
     let (mut num, mut den) = (blur(&weighted, sigma), blur(conf, sigma));
     num.data_mut()
@@ -183,11 +176,7 @@ fn push_pull(num: &Plane, den: &Plane) -> Option<Plane> {
     let mut current = Plane::from_vec(
         n.width(),
         n.height(),
-        n.data()
-            .iter()
-            .zip(d.data())
-            .map(|(a, b)| if *b > 0.0 { a / b } else { coarse_mean })
-            .collect(),
+        n.data().iter().zip(d.data()).map(|(a, b)| if *b > 0.0 { a / b } else { coarse_mean }).collect(),
     );
     for (n, d) in levels.into_iter().rev() {
         let up = expand(&current, n.width(), n.height());
@@ -223,10 +212,7 @@ mod tests {
     #[test]
     fn sharper_frame_has_higher_focus() {
         let (_, frames) = crate::stack::tests::banded_stack(64, 32, 2);
-        let (f0, f1) = (
-            focus_measure(&Cpu, &frames.0[0], 4),
-            focus_measure(&Cpu, &frames.0[1], 4),
-        );
+        let (f0, f1) = (focus_measure(&Cpu, &frames.0[0], 4), focus_measure(&Cpu, &frames.0[1], 4));
         assert!(f0.get(10, 16) > 10.0 * f1.get(10, 16));
         assert!(f1.get(54, 16) > 10.0 * f0.get(54, 16));
     }
@@ -249,23 +235,14 @@ mod tests {
         let den = Plane::from_vec(64, 64, vec![1.0; 64 * 64]);
         let num = Plane::from_vec(64, 64, (0..64 * 64).map(|i| (i % 64 / 32) as f32).collect());
         let out = push_pull(&num, &den).unwrap();
-        assert!(
-            out.get(10, 10) < 0.06 && out.get(50, 10) > 0.94,
-            "{} {}",
-            out.get(10, 10),
-            out.get(50, 10)
-        );
+        assert!(out.get(10, 10) < 0.06 && out.get(50, 10) > 0.94, "{} {}", out.get(10, 10), out.get(50, 10));
     }
 
     #[test]
     fn confidence_ignores_noise_and_clipping() {
         let (w, h) = (100, 10);
         // Columns 0..50: one frame clearly sharper; 50..95: barely (noise); 95..: clipped.
-        let best = Plane::from_vec(
-            w,
-            h,
-            (0..w * h).map(|i| if i % w < 50 { 1.0 } else { 0.0101 }).collect(),
-        );
+        let best = Plane::from_vec(w, h, (0..w * h).map(|i| if i % w < 50 { 1.0 } else { 0.0101 }).collect());
         let sum = Plane::from_vec(w, h, vec![0.04; w * h]);
         let bright = Plane::from_vec(w, h, (0..w * h).map(|i| if i % w >= 95 { 0.95 } else { 0.2 }).collect());
         let mut best = best;

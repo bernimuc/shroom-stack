@@ -80,32 +80,13 @@ fn main() -> anyhow::Result<()> {
         Command::Info { files } => info(&files),
         Command::Convert { input, output } => convert(&input, &output),
         Command::Sharpness { files, tiles } => sharpness(&files, tiles),
-        Command::Preview {
-            input,
-            output,
-            size,
-            crop,
-        } => preview(&input, &output, size, crop),
-        Command::Stack {
-            files,
-            output,
-            method,
-            radius,
-            smoothing,
-            no_align,
-            cpu,
-            preview,
-            depth_map,
-        } => {
+        Command::Preview { input, output, size, crop } => preview(&input, &output, size, crop),
+        Command::Stack { files, output, method, radius, smoothing, no_align, cpu, preview, depth_map } => {
             let method = match method {
                 MethodArg::DepthMap => Method::DepthMap { radius, smoothing },
                 MethodArg::Pyramid => Method::Pyramid { smoothing },
             };
-            let settings = StackSettings {
-                method,
-                align: !no_align,
-                use_gpu: !cpu,
-            };
+            let settings = StackSettings { method, align: !no_align, use_gpu: !cpu };
             stack_files(&files, &output, &settings, preview.as_deref(), depth_map.as_deref())
         }
     }
@@ -115,19 +96,9 @@ fn info(files: &[PathBuf]) -> anyhow::Result<()> {
     let mut frames: Vec<FrameInfo> = files.iter().map(|p| io::read_frame_info(p)).collect::<Result<_, _>>()?;
     io::sort_frames(&mut frames);
     for f in &frames {
-        let time = f
-            .capture_time
-            .map(|t| t.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
-            .unwrap_or("-".into());
-        let preview = f
-            .preview
-            .as_ref()
-            .map(|p| format!("{}x{}", p.width, p.height))
-            .unwrap_or("-".into());
-        println!(
-            "{}  {}  {}  {}x{}  preview {}",
-            f.file_name, time, f.camera, f.width, f.height, preview
-        );
+        let time = f.capture_time.map(|t| t.format("%Y-%m-%d %H:%M:%S%.3f").to_string()).unwrap_or("-".into());
+        let preview = f.preview.as_ref().map(|p| format!("{}x{}", p.width, p.height)).unwrap_or("-".into());
+        println!("{}  {}  {}  {}x{}  preview {}", f.file_name, time, f.camera, f.width, f.height, preview);
     }
     Ok(())
 }
@@ -137,12 +108,7 @@ fn convert(input: &Path, output: &Path) -> anyhow::Result<()> {
     let frame = io::load_linear(input).with_context(|| format!("loading {}", input.display()))?;
     eprintln!("decoded + demosaiced in {:.2?}", t.elapsed());
     let t = Instant::now();
-    io::write_linear_dng(
-        output,
-        &frame.image,
-        &frame.template,
-        concat!("Shroom Stack ", env!("CARGO_PKG_VERSION")),
-    )?;
+    io::write_linear_dng(output, &frame.image, &frame.template, concat!("Shroom Stack ", env!("CARGO_PKG_VERSION")))?;
     eprintln!("written in {:.2?}", t.elapsed());
     Ok(())
 }
@@ -168,12 +134,7 @@ fn stack_files(
         };
         eprint!("\r{stage} {}/{}   ", p.frame + 1, p.total);
     };
-    let result = stack::stack(
-        &FileFrames { paths: paths.clone() },
-        settings,
-        &progress,
-        &CancelToken::default(),
-    )?;
+    let result = stack::stack(&FileFrames { paths: paths.clone() }, settings, &progress, &CancelToken::default())?;
     eprintln!("\nstacked in {:.2?} ({})", t.elapsed(), result.backend);
     if let Some(alignment) = &result.alignment {
         let last = alignment.transforms.last().unwrap();
@@ -188,20 +149,12 @@ fn stack_files(
     }
 
     let first = io::load_linear(&paths[0])?;
-    io::write_linear_dng(
-        output,
-        &result.image,
-        &first.template,
-        concat!("Shroom Stack ", env!("CARGO_PKG_VERSION")),
-    )?;
+    io::write_linear_dng(output, &result.image, &first.template, concat!("Shroom Stack ", env!("CARGO_PKG_VERSION")))?;
     if let Some(path) = preview {
         save_jpeg(&render_display(&result.image, &first.color, Some(2048)), path)?;
     }
     if let Some(path) = depth_map {
-        save_jpeg(
-            &render_depth_map(&result.depth_map, (paths.len() - 1) as f32, Some(2048)),
-            path,
-        )?;
+        save_jpeg(&render_depth_map(&result.depth_map, (paths.len() - 1) as f32, Some(2048)), path)?;
     }
     Ok(())
 }
@@ -240,12 +193,7 @@ fn sharpness(files: &[PathBuf], tiles: usize) -> anyhow::Result<()> {
         for row in grid.chunks(tw).zip(grids[0].chunks(tw)) {
             println!(
                 "  {}",
-                row.0
-                    .iter()
-                    .zip(row.1)
-                    .map(|(a, b)| format!("{:5.2}", a / b))
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                row.0.iter().zip(row.1).map(|(a, b)| format!("{:5.2}", a / b)).collect::<Vec<_>>().join(" ")
             );
         }
     }

@@ -111,55 +111,36 @@ struct Opened {
 }
 
 fn open(path: &Path) -> Result<Opened> {
-    let source = RawSource::new(path).map_err(|source| Error::Io {
-        path: path.into(),
-        source,
-    })?;
+    let source = RawSource::new(path).map_err(|source| Error::Io { path: path.into(), source })?;
     let decoder = rawler::get_decoder(&source).map_err(|e| decode_err(path, e))?;
     Ok(Opened { source, decoder })
 }
 
 fn decode_err(path: &Path, e: impl std::fmt::Display) -> Error {
-    Error::Decode {
-        path: path.into(),
-        message: e.to_string(),
-    }
+    Error::Decode { path: path.into(), message: e.to_string() }
 }
 
 pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
     let Opened { source, decoder } = open(path)?;
     let params = RawDecodeParams::default();
-    let metadata = decoder
-        .raw_metadata(&source, &params)
-        .map_err(|e| decode_err(path, e))?;
+    let metadata = decoder.raw_metadata(&source, &params).map_err(|e| decode_err(path, e))?;
     // A dummy decode parses the image layout without decompressing pixel data.
-    let raw = decoder
-        .raw_image(&source, &params, true)
-        .map_err(|e| decode_err(path, e))?;
-    let (width, height) = raw
-        .active_area
-        .map(|a| (a.d.w, a.d.h))
-        .unwrap_or((raw.width, raw.height));
+    let raw = decoder.raw_image(&source, &params, true).map_err(|e| decode_err(path, e))?;
+    let (width, height) = raw.active_area.map(|a| (a.d.w, a.d.h)).unwrap_or((raw.width, raw.height));
     let preview = decoder.preview_image(&source, &params).ok().flatten().map(|img| {
         let rgb = img.to_rgb8();
-        DisplayImage {
-            width: rgb.width() as usize,
-            height: rgb.height() as usize,
-            data: rgb.into_raw(),
-        }
+        DisplayImage { width: rgb.width() as usize, height: rgb.height() as usize, data: rgb.into_raw() }
     });
     Ok(FrameInfo {
         path: path.into(),
-        file_name: path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+        file_name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
         file_modified: std::fs::metadata(path).and_then(|m| m.modified()).ok(),
         capture_time: capture_time(&metadata),
         camera: format!("{} {}", raw.clean_make, raw.clean_model).trim().to_string(),
         width,
         height,
         preview,
+        color: color_info(&raw),
     })
 }
 
@@ -175,21 +156,14 @@ fn capture_time(metadata: &RawMetadata) -> Option<NaiveDateTime> {
 fn decode_full(path: &Path) -> Result<(RawImage, DngTemplate)> {
     let Opened { source, decoder } = open(path)?;
     let params = RawDecodeParams::default();
-    let metadata = decoder
-        .raw_metadata(&source, &params)
-        .map_err(|e| decode_err(path, e))?;
-    let mut raw = decoder
-        .raw_image(&source, &params, false)
-        .map_err(|e| decode_err(path, e))?;
+    let metadata = decoder.raw_metadata(&source, &params).map_err(|e| decode_err(path, e))?;
+    let mut raw = decoder.raw_image(&source, &params, false).map_err(|e| decode_err(path, e))?;
     let ifd_tags = |which, filter: &dyn Fn(u16) -> bool| -> Result<Vec<(u16, Value)>> {
         Ok(decoder
             .ifd(which)
             .map_err(|e| decode_err(path, e))?
             .map(|ifd| {
-                ifd.value_iter()
-                    .filter(|(tag, _)| filter(**tag))
-                    .map(|(tag, value)| (*tag, value.clone()))
-                    .collect()
+                ifd.value_iter().filter(|(tag, _)| filter(**tag)).map(|(tag, value)| (*tag, value.clone())).collect()
             })
             .unwrap_or_default())
     };
@@ -201,22 +175,19 @@ fn decode_full(path: &Path) -> Result<(RawImage, DngTemplate)> {
     }
     let raw_tags = ifd_tags(WellKnownIFD::VirtualDngRawTags, &|t| KEPT_RAW_TAGS.contains(&t))?;
     // rawler's DNG decoder doesn't implement `xpacket`, so read the XMP tag directly.
-    let xmp = ifd_tags(WellKnownIFD::Root, &|t| t == XMP_TAG)?
-        .into_iter()
-        .find_map(|(_, value)| match value {
-            Value::Byte(bytes) | Value::Undefined(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
-            _ => None,
-        });
+    let xmp = ifd_tags(WellKnownIFD::Root, &|t| t == XMP_TAG)?.into_iter().find_map(|(_, value)| match value {
+        Value::Byte(bytes) | Value::Undefined(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+        _ => None,
+    });
     let data = std::mem::replace(&mut raw.data, RawImageData::Integer(Vec::new()));
-    let template = DngTemplate {
-        raw: raw.clone(),
-        metadata,
-        root_tags,
-        raw_tags,
-        xmp,
-    };
+    let template = DngTemplate { raw: raw.clone(), metadata, root_tags, raw_tags, xmp };
     raw.data = data;
     Ok((raw, template))
+}
+
+/// Reads the metadata needed to write a result DNG based on this file.
+pub fn read_template(path: &Path) -> Result<DngTemplate> {
+    Ok(decode_full(path)?.1)
 }
 
 /// Decodes a Bayer DNG into a normalised mosaic.
@@ -228,21 +199,12 @@ pub fn decode_raw(path: &Path) -> Result<RawFrame> {
 /// Normalises decoded Bayer data into a [`RawFrame`].
 fn cfa_frame(path: &Path, raw: RawImage, template: DngTemplate) -> Result<RawFrame> {
     let RawPhotometricInterpretation::Cfa(config) = &raw.photometric else {
-        return Err(Error::Unsupported {
-            path: path.into(),
-            message: "not a Bayer raw image".into(),
-        });
+        return Err(Error::Unsupported { path: path.into(), message: "not a Bayer raw image".into() });
     };
     if raw.cpp != 1 {
-        return Err(Error::Unsupported {
-            path: path.into(),
-            message: format!("{} samples per CFA pixel", raw.cpp),
-        });
+        return Err(Error::Unsupported { path: path.into(), message: format!("{} samples per CFA pixel", raw.cpp) });
     }
-    let (ax, ay, w, h) = raw
-        .active_area
-        .map(|a| (a.p.x, a.p.y, a.d.w, a.d.h))
-        .unwrap_or((0, 0, raw.width, raw.height));
+    let (ax, ay, w, h) = raw.active_area.map(|a| (a.p.x, a.p.y, a.d.w, a.d.h)).unwrap_or((0, 0, raw.width, raw.height));
     let name: String = (0..4)
         .map(|i| match config.cfa.color_at(i / 2, i % 2) {
             0 => 'R',
@@ -252,10 +214,7 @@ fn cfa_frame(path: &Path, raw: RawImage, template: DngTemplate) -> Result<RawFra
         })
         .collect();
     let pattern = CfaPattern::from_name(&name)
-        .ok_or_else(|| Error::Unsupported {
-            path: path.into(),
-            message: format!("CFA pattern {name}"),
-        })?
+        .ok_or_else(|| Error::Unsupported { path: path.into(), message: format!("CFA pattern {name}") })?
         .shifted(ax, ay);
 
     let white = raw.whitelevel.0.first().copied().unwrap_or(u16::MAX as u32) as f32;
@@ -274,12 +233,7 @@ fn cfa_frame(path: &Path, raw: RawImage, template: DngTemplate) -> Result<RawFra
         }
     });
     let color = color_info(&raw);
-    Ok(RawFrame {
-        mosaic,
-        pattern,
-        color,
-        template,
-    })
+    Ok(RawFrame { mosaic, pattern, color, template })
 }
 
 /// Loads a frame for stacking: Bayer data stays a mosaic (demosaiced by the compute
@@ -307,10 +261,8 @@ pub fn load_linear(path: &Path) -> Result<LinearFrame> {
             })
         }
         RawPhotometricInterpretation::LinearRaw if raw.cpp == 3 => {
-            let (ax, ay, w, h) = raw
-                .active_area
-                .map(|a| (a.p.x, a.p.y, a.d.w, a.d.h))
-                .unwrap_or((0, 0, raw.width, raw.height));
+            let (ax, ay, w, h) =
+                raw.active_area.map(|a| (a.p.x, a.p.y, a.d.w, a.d.h)).unwrap_or((0, 0, raw.width, raw.height));
             let samples = raw.data.as_f32();
             let white: Vec<f32> = (0..3)
                 .map(|c| *raw.whitelevel.0.get(c).or(raw.whitelevel.0.first()).unwrap_or(&65535) as f32)
@@ -330,11 +282,7 @@ pub fn load_linear(path: &Path) -> Result<LinearFrame> {
                     }
                 }
             }
-            Ok(LinearFrame {
-                image,
-                color: color_info(&raw),
-                template,
-            })
+            Ok(LinearFrame { image, color: color_info(&raw), template })
         }
         other => Err(Error::Unsupported {
             path: path.into(),
@@ -345,11 +293,7 @@ pub fn load_linear(path: &Path) -> Result<LinearFrame> {
 
 fn color_info(raw: &RawImage) -> ColorInfo {
     let wb = [raw.wb_coeffs[0], raw.wb_coeffs[1], raw.wb_coeffs[2]];
-    let wb = if wb.iter().all(|v| v.is_finite() && *v > 0.0) {
-        wb
-    } else {
-        [1.0; 3]
-    };
+    let wb = if wb.iter().all(|v| v.is_finite() && *v > 0.0) { wb } else { [1.0; 3] };
     let xyz_to_cam = raw
         .color_matrix
         .get(&Illuminant::D65)
@@ -375,12 +319,8 @@ pub(crate) mod tests {
             clean_model: "Test Cam".into(),
             ..Default::default()
         };
-        cam.color_matrix.insert(
-            Illuminant::D65,
-            vec![
-                0.9766, -0.3416, -0.0464, -0.4176, 1.1999, 0.2463, -0.0786, 0.1513, 0.6127,
-            ],
-        );
+        cam.color_matrix
+            .insert(Illuminant::D65, vec![0.9766, -0.3416, -0.0464, -0.4176, 1.1999, 0.2463, -0.0786, 0.1513, 0.6127]);
         let mut raw = RawImage::new(
             cam,
             PixU16::new_with(vec![0; 6], 6, 1),
@@ -392,13 +332,7 @@ pub(crate) mod tests {
             false,
         );
         raw.data = RawImageData::Integer(Vec::new());
-        DngTemplate {
-            raw,
-            metadata: RawMetadata::default(),
-            root_tags: Vec::new(),
-            raw_tags: Vec::new(),
-            xmp: None,
-        }
+        DngTemplate { raw, metadata: RawMetadata::default(), root_tags: Vec::new(), raw_tags: Vec::new(), xmp: None }
     }
 
     #[test]

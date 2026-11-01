@@ -19,11 +19,7 @@ pub fn convolve_separable(src: &Plane, kernel: &[f32]) -> Plane {
     tmp.data_mut().par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         let line = &src.data()[y * w..(y + 1) * w];
         for (x, out) in row.iter_mut().enumerate() {
-            *out = kernel
-                .iter()
-                .enumerate()
-                .map(|(k, kv)| kv * line[clamp(x as isize + k as isize - r, w)])
-                .sum();
+            *out = kernel.iter().enumerate().map(|(k, kv)| kv * line[clamp(x as isize + k as isize - r, w)]).sum();
         }
     });
     let mut out = Plane::new(w, h);
@@ -49,9 +45,7 @@ pub fn gaussian_blur(src: &Plane, sigma: f32) -> Plane {
         return src.clone();
     }
     let r = (3.0 * sigma).ceil() as isize;
-    let mut kernel: Vec<f32> = (-r..=r)
-        .map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp())
-        .collect();
+    let mut kernel: Vec<f32> = (-r..=r).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
     let sum: f32 = kernel.iter().sum();
     kernel.iter_mut().for_each(|v| *v /= sum);
     convolve_separable(src, &kernel)
@@ -95,11 +89,7 @@ pub fn expand(src: &Plane, width: usize, height: usize) -> Plane {
     let expand_1d = |get: &dyn Fn(usize) -> f32, n_src: usize, x: usize| -> f32 {
         let c = |j: isize| get(j.clamp(0, n_src as isize - 1) as usize);
         let j = (x / 2) as isize;
-        if x.is_multiple_of(2) {
-            (c(j - 1) + 6.0 * c(j) + c(j + 1)) / 8.0
-        } else {
-            (c(j) + c(j + 1)) / 2.0
-        }
+        if x.is_multiple_of(2) { (c(j - 1) + 6.0 * c(j) + c(j + 1)) / 8.0 } else { (c(j) + c(j + 1)) / 2.0 }
     };
     let (sw, sh) = (src.width(), src.height());
     let mut tmp = Plane::new(width, sh);
@@ -130,9 +120,7 @@ pub fn downsample_box(src: &Plane, factor: usize) -> Plane {
         for (x, o) in row.iter_mut().enumerate() {
             let mut sum = 0.0;
             for sy in y * factor..(y + 1) * factor {
-                sum += src.data()[sy * src.width() + x * factor..][..factor]
-                    .iter()
-                    .sum::<f32>();
+                sum += src.data()[sy * src.width() + x * factor..][..factor].iter().sum::<f32>();
             }
             *o = sum * norm;
         }
@@ -142,13 +130,8 @@ pub fn downsample_box(src: &Plane, factor: usize) -> Plane {
 
 /// Splits an RGB image into three planes.
 pub fn split_channels(img: &RgbImage) -> [Plane; 3] {
-    [0, 1, 2].map(|c| {
-        Plane::from_vec(
-            img.width(),
-            img.height(),
-            img.data().iter().skip(c).step_by(3).copied().collect(),
-        )
-    })
+    [0, 1, 2]
+        .map(|c| Plane::from_vec(img.width(), img.height(), img.data().iter().skip(c).step_by(3).copied().collect()))
 }
 
 /// Inverse of [`split_channels`].
@@ -156,12 +139,7 @@ pub fn merge_channels(planes: &[Plane; 3]) -> RgbImage {
     let (w, h) = (planes[0].width(), planes[0].height());
     let mut img = RgbImage::new(w, h);
     for (c, plane) in planes.iter().enumerate() {
-        img.data_mut()
-            .iter_mut()
-            .skip(c)
-            .step_by(3)
-            .zip(plane.data())
-            .for_each(|(d, s)| *d = *s);
+        img.data_mut().iter_mut().skip(c).step_by(3).zip(plane.data()).for_each(|(d, s)| *d = *s);
     }
     img
 }
@@ -171,10 +149,7 @@ pub fn luminance(img: &RgbImage) -> Plane {
     Plane::from_vec(
         img.width(),
         img.height(),
-        img.data()
-            .par_chunks(3)
-            .map(|p| (p[0] + 2.0 * p[1] + p[2]) / 4.0)
-            .collect(),
+        img.data().par_chunks(3).map(|p| (p[0] + 2.0 * p[1] + p[2]) / 4.0).collect(),
     )
 }
 
@@ -197,11 +172,7 @@ pub(crate) mod tests {
     }
 
     fn max_diff(a: &Plane, b: &Plane) -> f32 {
-        a.data()
-            .iter()
-            .zip(b.data())
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0, f32::max)
+        a.data().iter().zip(b.data()).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
     }
 
     #[test]

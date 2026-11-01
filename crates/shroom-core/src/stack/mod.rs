@@ -34,10 +34,7 @@ pub enum Method {
 }
 
 impl Method {
-    pub const DEFAULT_DEPTH_MAP: Method = Method::DepthMap {
-        radius: 8,
-        smoothing: 4,
-    };
+    pub const DEFAULT_DEPTH_MAP: Method = Method::DepthMap { radius: 8, smoothing: 4 };
     pub const DEFAULT_PYRAMID: Method = Method::Pyramid { smoothing: 4 };
 }
 
@@ -127,11 +124,7 @@ impl CancelToken {
     }
 
     pub(crate) fn check(&self) -> Result<()> {
-        if self.is_cancelled() {
-            Err(Error::Cancelled)
-        } else {
-            Ok(())
-        }
+        if self.is_cancelled() { Err(Error::Cancelled) } else { Ok(()) }
     }
 }
 
@@ -147,11 +140,7 @@ pub struct StackSettings {
 
 impl StackSettings {
     pub fn new(method: Method) -> Self {
-        Self {
-            method,
-            align: true,
-            use_gpu: true,
-        }
+        Self { method, align: true, use_gpu: true }
     }
 }
 
@@ -166,11 +155,40 @@ pub struct StackResult {
     pub backend: String,
 }
 
+/// Low-resolution view of the processing state, for live display.
+#[derive(Clone, Debug)]
+pub struct Snapshot {
+    pub stage: Stage,
+    pub frame_index: usize,
+    /// The frame just processed (aligned, once alignment has been estimated), downscaled.
+    pub frame: RgbImage,
+    /// Depth map (depth map method) or detail source map (pyramid) so far, same scale.
+    pub map: Option<Plane>,
+    /// Full-resolution size of what the snapshot shows.
+    pub full_size: (usize, usize),
+}
+
+/// Longer side of snapshot images.
+const SNAPSHOT_SIZE: usize = 1024;
+/// Snapshots are taken at most this often (they cost GPU time and a download).
+const SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Stacks all frames of `source`.
 pub fn stack(
     source: &dyn FrameSource,
     settings: &StackSettings,
     progress: &dyn Fn(Progress),
+    cancel: &CancelToken,
+) -> Result<StackResult> {
+    stack_with_snapshots(source, settings, progress, None, cancel)
+}
+
+/// Like [`stack`], additionally passing periodic [`Snapshot`]s to `snapshot`.
+pub fn stack_with_snapshots(
+    source: &dyn FrameSource,
+    settings: &StackSettings,
+    progress: &dyn Fn(Progress),
+    snapshot: Option<&dyn Fn(Snapshot)>,
     cancel: &CancelToken,
 ) -> Result<StackResult> {
     if source.len() < 2 {
@@ -180,9 +198,9 @@ pub fn stack(
         && let Some(gpu) = crate::gpu::gpu()
         && source.frame_size().is_none_or(|(w, h)| gpu.fits(w, h))
     {
-        return stack_with(gpu, source, settings, progress, cancel);
+        return stack_with(gpu, source, settings, progress, snapshot, cancel);
     }
-    stack_with(&Cpu, source, settings, progress, cancel)
+    stack_with(&Cpu, source, settings, progress, snapshot, cancel)
 }
 
 fn stack_with<B: Backend>(
@@ -190,31 +208,18 @@ fn stack_with<B: Backend>(
     source: &dyn FrameSource,
     settings: &StackSettings,
     progress: &dyn Fn(Progress),
+    snapshot: Option<&dyn Fn(Snapshot)>,
     cancel: &CancelToken,
 ) -> Result<StackResult> {
     let run = || {
-        let alignment = if settings.align {
-            Some(align_with(backend, source, progress, cancel)?)
-        } else {
-            None
-        };
-        let ctx = Context {
-            backend,
-            source,
-            alignment: alignment.as_ref(),
-            progress,
-            cancel,
-        };
+        let alignment =
+            if settings.align { Some(align_with(backend, source, progress, snapshot, cancel)?) } else { None };
+        let ctx = Context::new(backend, source, alignment.as_ref(), progress, snapshot, cancel);
         let (image, depth_map) = match settings.method {
             Method::DepthMap { radius, smoothing } => depthmap::stack(&ctx, radius as usize, smoothing as f32)?,
             Method::Pyramid { smoothing } => pyramid::stack(&ctx, smoothing as usize)?,
         };
-        Ok(StackResult {
-            image,
-            depth_map,
-            alignment,
-            backend: backend.name(),
-        })
+        Ok(StackResult { image, depth_map, alignment, backend: backend.name() })
     };
     let result = run();
     backend.trim();
@@ -238,10 +243,44 @@ pub(crate) struct Context<'a, B: Backend> {
     pub source: &'a dyn FrameSource,
     pub alignment: Option<&'a Alignment>,
     pub progress: &'a dyn Fn(Progress),
+    pub snapshot: Option<&'a dyn Fn(Snapshot)>,
     pub cancel: &'a CancelToken,
+    last_snapshot: std::cell::Cell<Option<std::time::Instant>>,
 }
 
-impl<B: Backend> Context<'_, B> {
+impl<'a, B: Backend> Context<'a, B> {
+    pub fn new(
+        backend: &'a B,
+        source: &'a dyn FrameSource,
+        alignment: Option<&'a Alignment>,
+        progress: &'a dyn Fn(Progress),
+        snapshot: Option<&'a dyn Fn(Snapshot)>,
+        cancel: &'a CancelToken,
+    ) -> Self {
+        Self { backend, source, alignment, progress, snapshot, cancel, last_snapshot: Default::default() }
+    }
+
+    /// Passes a downscaled view of `frame` and `map` to the snapshot callback, if any and
+    /// if the last snapshot is old enough (or `force`).
+    pub(crate) fn snapshot(&self, stage: Stage, index: usize, frame: &B::Rgb, map: Option<&B::Plane>, force: bool) {
+        let Some(callback) = self.snapshot else { return };
+        let now = std::time::Instant::now();
+        if !force && self.last_snapshot.get().is_some_and(|t| now - t < SNAPSHOT_INTERVAL) {
+            return;
+        }
+        self.last_snapshot.set(Some(now));
+        let b = self.backend;
+        let full_size = b.rgb_size(frame);
+        let factor = full_size.0.max(full_size.1).div_ceil(SNAPSHOT_SIZE).max(1);
+        callback(Snapshot {
+            stage,
+            frame_index: index,
+            frame: b.download_rgb(&b.downsample_rgb(frame, factor)),
+            map: map.map(|m| b.download_plane(&b.downsample_box(m, factor))),
+            full_size,
+        });
+    }
+
     /// Calls `f` with each frame of `indices` (aligned, if enabled), reporting progress
     /// and checking for cancellation. Up to [`PREFETCH`] upcoming frames are decoded on
     /// background threads while the current one is processed. All frames must have the
@@ -259,20 +298,12 @@ impl<B: Backend> Context<'_, B> {
             let mut pending: std::collections::VecDeque<_> = indices.iter().take(PREFETCH).map(|&i| fetch(i)).collect();
             let mut size = None;
             for (k, &index) in indices.iter().enumerate() {
-                let frame = pending
-                    .pop_front()
-                    .expect("frame requested")
-                    .join()
-                    .expect("decoder thread panicked")?;
+                let frame = pending.pop_front().expect("frame requested").join().expect("decoder thread panicked")?;
                 self.cancel.check()?;
                 if let Some(&i) = indices.get(k + PREFETCH) {
                     pending.push_back(fetch(i));
                 }
-                (self.progress)(Progress {
-                    stage,
-                    frame: index,
-                    total: self.source.len(),
-                });
+                (self.progress)(Progress { stage, frame: index, total: self.source.len() });
                 self.backend.finish();
                 let mut img = prepare(self.backend, frame);
                 if let Some(alignment) = self.alignment {
@@ -346,23 +377,13 @@ pub(crate) mod tests {
     }
 
     fn unaligned(method: Method) -> StackSettings {
-        StackSettings {
-            method,
-            align: false,
-            use_gpu: false,
-        }
+        StackSettings { method, align: false, use_gpu: false }
     }
 
     #[test]
     fn rejects_single_frame() {
         let frames = MemFrames(vec![RgbImage::new(8, 8)]);
-        let err = stack(
-            &frames,
-            &unaligned(Method::DEFAULT_PYRAMID),
-            &|_| {},
-            &CancelToken::default(),
-        )
-        .unwrap_err();
+        let err = stack(&frames, &unaligned(Method::DEFAULT_PYRAMID), &|_| {}, &CancelToken::default()).unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
     }
 
@@ -396,19 +417,10 @@ pub(crate) mod tests {
         let (_, frames) = banded_stack(32, 32, 3);
         for method in [Method::DEFAULT_DEPTH_MAP, Method::DEFAULT_PYRAMID] {
             let seen = std::sync::Mutex::new(Vec::new());
-            stack(
-                &frames,
-                &unaligned(method),
-                &|p| seen.lock().unwrap().push(p),
-                &CancelToken::default(),
-            )
-            .unwrap();
+            stack(&frames, &unaligned(method), &|p| seen.lock().unwrap().push(p), &CancelToken::default()).unwrap();
             let seen = seen.into_inner().unwrap();
             for i in 0..3 {
-                assert!(
-                    seen.iter()
-                        .any(|p| p.stage == Stage::Analysing && p.frame == i && p.total == 3)
-                );
+                assert!(seen.iter().any(|p| p.stage == Stage::Analysing && p.frame == i && p.total == 3));
             }
         }
     }
@@ -423,10 +435,7 @@ pub(crate) mod tests {
                 let (x0, x1) = (i * w / n, (i + 1) * w / n);
                 let stacked = band_error(&result.image, &sharp, x0, x1, 12);
                 let single = band_error(&frames.0[(i + 1) % n], &sharp, x0, x1, 12);
-                assert!(
-                    stacked < 0.2 * single,
-                    "{method:?} band {i}: stacked {stacked}, unfocused {single}"
-                );
+                assert!(stacked < 0.2 * single, "{method:?} band {i}: stacked {stacked}, unfocused {single}");
                 // Depth map points to the sharp frame in the band centre.
                 let d = result.depth_map.get((x0 + x1) / 2, h / 2);
                 assert!((d - i as f32).abs() < 0.5, "{method:?} band {i}: depth {d}");

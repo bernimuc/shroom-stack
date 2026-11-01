@@ -25,12 +25,8 @@ const LJ92_PREDICTOR: u8 = 1;
 /// write never leaves a truncated file at `path`.
 pub fn write_linear_dng(path: &Path, image: &RgbImage, template: &DngTemplate, software: &str) -> Result<()> {
     let tmp = path.with_extension("dng.part");
-    let result = write_to(&tmp, image, template, software).and_then(|()| {
-        std::fs::rename(&tmp, path).map_err(|source| Error::Io {
-            path: path.into(),
-            source,
-        })
-    });
+    let result = write_to(&tmp, image, template, software)
+        .and_then(|()| std::fs::rename(&tmp, path).map_err(|source| Error::Io { path: path.into(), source }));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -38,10 +34,7 @@ pub fn write_linear_dng(path: &Path, image: &RgbImage, template: &DngTemplate, s
 }
 
 fn write_to(path: &Path, image: &RgbImage, template: &DngTemplate, software: &str) -> Result<()> {
-    let enc_err = |e: rawler::dng::writer::DngError| Error::Encode {
-        path: path.into(),
-        message: e.to_string(),
-    };
+    let enc_err = |e: rawler::dng::writer::DngError| Error::Encode { path: path.into(), message: e.to_string() };
 
     let mut raw = template.raw.clone();
     raw.width = image.width();
@@ -55,11 +48,7 @@ fn write_to(path: &Path, image: &RgbImage, template: &DngTemplate, software: &st
     raw.crop_area = None;
     raw.blackareas.clear();
     raw.data = RawImageData::Integer(
-        image
-            .data()
-            .iter()
-            .map(|v| (v.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16)
-            .collect(),
+        image.data().iter().map(|v| (v.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16).collect(),
     );
 
     let display = render_display(image, &template.color(), Some(PREVIEW_SIZE));
@@ -67,21 +56,12 @@ fn write_to(path: &Path, image: &RgbImage, template: &DngTemplate, software: &st
         .map(image::DynamicImage::ImageRgb8)
         .expect("display image size is consistent");
 
-    let file = File::create(path).map_err(|source| Error::Io {
-        path: path.into(),
-        source,
-    })?;
+    let file = File::create(path).map_err(|source| Error::Io { path: path.into(), source })?;
     let mut dng = DngWriter::new(BufWriter::new(file), DNG_VERSION_V1_4).map_err(enc_err)?;
 
     let mut main = dng.subframe(0);
-    main.raw_image(
-        &raw,
-        CropMode::None,
-        DngCompression::Lossless,
-        DngPhotometricConversion::Original,
-        LJ92_PREDICTOR,
-    )
-    .map_err(enc_err)?;
+    main.raw_image(&raw, CropMode::None, DngCompression::Lossless, DngPhotometricConversion::Original, LJ92_PREDICTOR)
+        .map_err(enc_err)?;
     main.ifd_mut().copy(template.raw_tags.iter().map(|(t, v)| (t, v)));
     main.finalize().map_err(enc_err)?;
 
@@ -92,20 +72,15 @@ fn write_to(path: &Path, image: &RgbImage, template: &DngTemplate, software: &st
 
     dng.load_base_tags(&raw).map_err(enc_err)?;
     dng.load_metadata(&template.metadata).map_err(enc_err)?;
-    dng.root_ifd_mut()
-        .add_tag(ExifTag::Orientation, raw.orientation.to_u16());
+    dng.root_ifd_mut().add_tag(ExifTag::Orientation, raw.orientation.to_u16());
     // The source's own colour tags take precedence: rawler rounds matrices when writing.
-    dng.root_ifd_mut()
-        .copy_with_override(template.root_tags.iter().map(|(t, v)| (t, v)));
+    dng.root_ifd_mut().copy_with_override(template.root_tags.iter().map(|(t, v)| (t, v)));
     if let Some(xmp) = &template.xmp {
         let uuid = uuid::Uuid::new_v4().to_string();
         dng.xpacket(super::xmp::for_result(xmp, &uuid)).map_err(enc_err)?;
     }
     dng.root_ifd_mut().add_tag(TiffCommonTag::Software, software);
-    dng.root_ifd_mut().add_tag(
-        ExifTag::ModifyDate,
-        chrono::Local::now().format("%Y:%m:%d %H:%M:%S").to_string(),
-    );
+    dng.root_ifd_mut().add_tag(ExifTag::ModifyDate, chrono::Local::now().format("%Y:%m:%d %H:%M:%S").to_string());
     dng.close().map_err(enc_err)
 }
 
@@ -137,25 +112,14 @@ mod tests {
 
         let back = load_linear(&path).unwrap();
         assert_eq!((back.image.width(), back.image.height()), (37, 23));
-        let max_err = img
-            .data()
-            .iter()
-            .zip(back.image.data())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
+        let max_err = img.data().iter().zip(back.image.data()).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         assert!(max_err <= 1.0 / 65535.0, "max error {max_err}");
         // Colour data is stored as rationals (1/10000 for matrices), so allow rounding.
         let (got, want) = (back.color, template.color());
         let close = |a: f32, b: f32| (a - b).abs() < 2e-4;
         assert!(got.wb.iter().zip(want.wb).all(|(a, b)| close(*a, b)), "{got:?}");
         let (gm, wm) = (got.xyz_to_cam.unwrap(), want.xyz_to_cam.unwrap());
-        assert!(
-            gm.as_flattened()
-                .iter()
-                .zip(wm.as_flattened())
-                .all(|(a, b)| close(*a, *b)),
-            "{gm:?}"
-        );
+        assert!(gm.as_flattened().iter().zip(wm.as_flattened()).all(|(a, b)| close(*a, *b)), "{gm:?}");
         assert_eq!(back.template.raw.clean_make, "Shroom");
     }
 
@@ -177,11 +141,7 @@ mod tests {
         write_linear_dng(&path, &gradient(4, 4), &template, "test").unwrap();
 
         let source = rawler::rawsource::RawSource::new(&path).unwrap();
-        let root = rawler::get_decoder(&source)
-            .unwrap()
-            .ifd(WellKnownIFD::Root)
-            .unwrap()
-            .unwrap();
+        let root = rawler::get_decoder(&source).unwrap().ifd(WellKnownIFD::Root).unwrap().unwrap();
         assert_eq!(root.get_entry(FORWARD_MATRIX_1).map(|e| &e.value), Some(&forward));
         assert_eq!(root.get_entry(COLOR_MATRIX_2).map(|e| &e.value), Some(&color));
     }

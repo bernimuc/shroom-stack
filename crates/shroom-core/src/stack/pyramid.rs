@@ -33,7 +33,6 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, smoothing: usize) -> Result<(R
     ctx.for_each_frame(Stage::Analysing, 0..n, |i, frame| {
         let (w, h) = b.rgb_size(&frame);
         let pyr = decompose(b, &frame, level_count(w, h));
-        drop(frame);
         match &mut state {
             None => {
                 let energies = pyr.levels.iter().map(|l| energy(b, l, radius)).collect();
@@ -50,6 +49,8 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, smoothing: usize) -> Result<(R
                 }
             }
         }
+        let map = state.as_ref().map(|(_, _, source)| source);
+        ctx.snapshot(Stage::Analysing, i, &frame, map, i + 1 == n);
         Ok(())
     })?;
     let (mut fused, _, source) = state.expect("at least two frames");
@@ -57,11 +58,7 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, smoothing: usize) -> Result<(R
         b.scale(base, 1.0 / n as f32);
     }
 
-    (ctx.progress)(super::Progress {
-        stage: Stage::Compositing,
-        frame: n - 1,
-        total: n,
-    });
+    (ctx.progress)(super::Progress { stage: Stage::Compositing, frame: n - 1, total: n });
     let mut image = collapse(b, fused);
     b.clamp_min_rgb(&mut image, 0.0);
     Ok((b.download_rgb(&image), b.download_plane(&source)))
@@ -89,10 +86,7 @@ fn decompose<B: Backend>(b: &B, img: &B::Rgb, levels: usize) -> Pyramid<B::Plane
         out.push(detail);
         current = smaller;
     }
-    Pyramid {
-        levels: out,
-        base: current,
-    }
+    Pyramid { levels: out, base: current }
 }
 
 fn collapse<B: Backend>(b: &B, pyr: Pyramid<B::Plane>) -> B::Rgb {
@@ -132,12 +126,7 @@ mod tests {
     fn decompose_collapse_is_lossless() {
         let img = merge_channels(&[noise(53, 37, 1), noise(53, 37, 2), noise(53, 37, 3)]);
         let back = collapse(&Cpu, decompose(&Cpu, &img, 3));
-        let err = img
-            .data()
-            .iter()
-            .zip(back.data())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0, f32::max);
+        let err = img.data().iter().zip(back.data()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
         assert!(err < 1e-5, "{err}");
     }
 
@@ -145,20 +134,10 @@ mod tests {
     fn identical_frames_give_the_frame() {
         let img = merge_channels(&[noise(40, 40, 4), noise(40, 40, 5), noise(40, 40, 6)]);
         let frames = crate::stack::tests::MemFrames(vec![img.clone(), img.clone(), img.clone()]);
-        let ctx = Context {
-            backend: &Cpu,
-            source: &frames,
-            alignment: None,
-            progress: &|_| {},
-            cancel: &Default::default(),
-        };
+        let cancel = Default::default();
+        let ctx = Context::new(&Cpu, &frames, None, &|_| {}, None, &cancel);
         let out = stack(&ctx, 4).unwrap().0;
-        let err = img
-            .data()
-            .iter()
-            .zip(out.data())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0, f32::max);
+        let err = img.data().iter().zip(out.data()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
         assert!(err < 1e-5, "{err}");
     }
 }

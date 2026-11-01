@@ -144,8 +144,8 @@ Each milestone ends with tests green and something runnable.
 | 3 ✅ | Alignment | transform estimation, warp, crop; synthetic tests (known transform) |
 | 4 ✅ | GPU | wgpu compute for demosaic, warp, focus measure, pyramid; CPU vs GPU equality tests; benchmarks on Stack 1 (34 × 47 MP) |
 | 5 ✅ | UI shell + Preparation | egui app, file list w/ thumbnails, preview widget with zoom/pan, toolbar, preflight check |
-| 6 | Processing workspace | worker thread, progress, live split view, cancel |
-| 7 | Postprocessing | result split view, save dialog, brush retouching with undo |
+| 6 ✅ | Processing workspace | worker thread, progress, live split view, cancel |
+| 7 | Postprocessing | ~~result split view, save dialog~~ (done in 6), brush retouching with undo |
 | 8 | Polish | performance, memory limits, error handling, app bundle/icon |
 
 Tests: unit tests per module with small synthetic images (generated in
@@ -261,3 +261,15 @@ Notes from milestone 5 (UI shell + Preparation):
   `cargo test -p shroom-ui -- --ignored` writes screenshots of Stack 3 to
   `target/ui-screenshots/`.
 * No emoji in UI text: fonts without them render boxes (and debug builds panic).
+
+Notes from milestone 6 (Processing workspace):
+
+* Core: `stack_with_snapshots` delivers downscaled live images (current frame, depth or
+  detail-source map so far) at most 4×/s; `FrameInfo` carries colour info for rendering.
+* Render → preflight → background job; progress bar over all stages, Cancel returns to
+  Preparation, errors are shown there. The finished stack opens in Postprocessing.
+* Postprocessing: selected input frame aligned to the result next to the result (or the
+  depth map), Save… writes a Linear DNG in the background. Going back to Preparation
+  asks before discarding the result.
+* End-to-end UI tests on Stack 3 (`cargo test --release -p shroom-ui -- --ignored`):
+  stacking, live view, saving, discard dialog, cancelling.

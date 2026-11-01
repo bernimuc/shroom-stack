@@ -71,11 +71,7 @@ macro_rules! kernel {
 }
 
 fn params(w: usize, h: usize) -> Params {
-    Params {
-        w: w as u32,
-        h: h as u32,
-        ..Default::default()
-    }
+    Params { w: w as u32, h: h as u32, ..Default::default() }
 }
 
 impl Gpu {
@@ -85,37 +81,22 @@ impl Gpu {
 
     /// Plane with undefined contents; every kernel writing one covers all pixels.
     fn plane(&self, w: usize, h: usize) -> GpuPlane {
-        GpuPlane {
-            buf: Pooled(Some(self.ctx.storage(w * h))),
-            w,
-            h,
-        }
+        GpuPlane { buf: Pooled(Some(self.ctx.storage(w * h))), w, h }
     }
 
     fn rgb(&self, w: usize, h: usize) -> GpuRgb {
-        GpuRgb {
-            buf: Pooled(Some(self.ctx.storage(w * h * 3))),
-            w,
-            h,
-        }
+        GpuRgb { buf: Pooled(Some(self.ctx.storage(w * h * 3))), w, h }
     }
 
     fn binary(&self, op: u32, a: &GpuPlane, b: &GpuPlane) -> GpuPlane {
         let out = self.plane(a.w, a.h);
-        let p = Params {
-            i: [op, 0, 0, 0],
-            ..params(a.w, a.h)
-        };
+        let p = Params { i: [op, 0, 0, 0], ..params(a.w, a.h) };
         self.run(kernel!("binary"), p, &[&a.buf, &b.buf, &out.buf], a.w, a.h);
         out
     }
 
     fn unary(&self, buf: &wgpu::Buffer, w: usize, h: usize, op: u32, f: f32) {
-        let p = Params {
-            i: [op, 0, 0, 0],
-            f: [f, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            ..params(w, h)
-        };
+        let p = Params { i: [op, 0, 0, 0], f: [f, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], ..params(w, h) };
         self.run(kernel!("unary"), p, &[buf], w, h);
     }
 }
@@ -128,10 +109,7 @@ impl Backend for Gpu {
         format!("GPU: {}", self.ctx.adapter_name)
     }
     fn finish(&self) {
-        self.ctx
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("GPU poll failed");
+        self.ctx.device.poll(wgpu::PollType::wait_indefinitely()).expect("GPU poll failed");
     }
     fn plane_size(&self, p: &GpuPlane) -> (usize, usize) {
         (p.w, p.h)
@@ -140,18 +118,10 @@ impl Backend for Gpu {
         (p.w, p.h)
     }
     fn upload_plane(&self, p: &Plane) -> GpuPlane {
-        GpuPlane {
-            buf: Pooled(Some(self.ctx.upload(p.data()))),
-            w: p.width(),
-            h: p.height(),
-        }
+        GpuPlane { buf: Pooled(Some(self.ctx.upload(p.data()))), w: p.width(), h: p.height() }
     }
     fn upload_rgb(&self, img: &RgbImage) -> GpuRgb {
-        GpuRgb {
-            buf: Pooled(Some(self.ctx.upload(img.data()))),
-            w: img.width(),
-            h: img.height(),
-        }
+        GpuRgb { buf: Pooled(Some(self.ctx.upload(img.data()))), w: img.width(), h: img.height() }
     }
     fn download_plane(&self, p: &GpuPlane) -> Plane {
         Plane::from_vec(p.w, p.h, self.ctx.download(&p.buf, p.w * p.h))
@@ -160,18 +130,10 @@ impl Backend for Gpu {
         RgbImage::from_vec(p.w, p.h, self.ctx.download(&p.buf, p.w * p.h * 3))
     }
     fn zeros_plane(&self, w: usize, h: usize) -> GpuPlane {
-        GpuPlane {
-            buf: Pooled(Some(self.ctx.zeroed(w * h))),
-            w,
-            h,
-        }
+        GpuPlane { buf: Pooled(Some(self.ctx.zeroed(w * h))), w, h }
     }
     fn zeros_rgb(&self, w: usize, h: usize) -> GpuRgb {
-        GpuRgb {
-            buf: Pooled(Some(self.ctx.zeroed(w * h * 3))),
-            w,
-            h,
-        }
+        GpuRgb { buf: Pooled(Some(self.ctx.zeroed(w * h * 3))), w, h }
     }
     fn trim(&self) {
         self.finish();
@@ -181,10 +143,7 @@ impl Backend for Gpu {
     fn demosaic(&self, mosaic: &GpuPlane, pattern: CfaPattern) -> GpuRgb {
         let out = self.rgb(mosaic.w, mosaic.h);
         let c = |x, y| pattern.color_at(x, y) as u32;
-        let p = Params {
-            i: [c(0, 0), c(1, 0), c(0, 1), c(1, 1)],
-            ..params(mosaic.w, mosaic.h)
-        };
+        let p = Params { i: [c(0, 0), c(1, 0), c(0, 1), c(1, 1)], ..params(mosaic.w, mosaic.h) };
         self.run(kernel!("demosaic"), p, &[&mosaic.buf, &out.buf], mosaic.w, mosaic.h);
         out
     }
@@ -203,21 +162,12 @@ impl Backend for Gpu {
     }
     fn luminance(&self, rgb: &GpuRgb) -> GpuPlane {
         let out = self.plane(rgb.w, rgb.h);
-        self.run(
-            kernel!("luminance"),
-            params(rgb.w, rgb.h),
-            &[&rgb.buf, &out.buf],
-            rgb.w,
-            rgb.h,
-        );
+        self.run(kernel!("luminance"), params(rgb.w, rgb.h), &[&rgb.buf, &out.buf], rgb.w, rgb.h);
         out
     }
     fn convolve(&self, src: &GpuPlane, kernel: &[f32]) -> GpuPlane {
         let taps = Pooled(Some(self.ctx.upload(kernel)));
-        let p = Params {
-            i: [(kernel.len() / 2) as u32, 0, 0, 0],
-            ..params(src.w, src.h)
-        };
+        let p = Params { i: [(kernel.len() / 2) as u32, 0, 0, 0], ..params(src.w, src.h) };
         let tmp = self.plane(src.w, src.h);
         self.run(kernel!("conv_h"), p, &[&src.buf, &*taps, &tmp.buf], src.w, src.h);
         let out = self.plane(src.w, src.h);
@@ -226,41 +176,32 @@ impl Backend for Gpu {
     }
     fn laplacian(&self, src: &GpuPlane, square: bool) -> GpuPlane {
         let out = self.plane(src.w, src.h);
-        let p = Params {
-            i: [square as u32, 0, 0, 0],
-            ..params(src.w, src.h)
-        };
+        let p = Params { i: [square as u32, 0, 0, 0], ..params(src.w, src.h) };
         self.run(kernel!("laplacian"), p, &[&src.buf, &out.buf], src.w, src.h);
         out
     }
     fn reduce(&self, src: &GpuPlane) -> GpuPlane {
         let out = self.plane(src.w.div_ceil(2), src.h.div_ceil(2));
-        let p = Params {
-            sw: src.w as u32,
-            sh: src.h as u32,
-            ..params(out.w, out.h)
-        };
+        let p = Params { sw: src.w as u32, sh: src.h as u32, ..params(out.w, out.h) };
         self.run(kernel!("reduce"), p, &[&src.buf, &out.buf], out.w, out.h);
         out
     }
     fn expand(&self, src: &GpuPlane, w: usize, h: usize) -> GpuPlane {
         let out = self.plane(w, h);
-        let p = Params {
-            sw: src.w as u32,
-            sh: src.h as u32,
-            ..params(w, h)
-        };
+        let p = Params { sw: src.w as u32, sh: src.h as u32, ..params(w, h) };
         self.run(kernel!("expand"), p, &[&src.buf, &out.buf], w, h);
         out
     }
     fn downsample_box(&self, src: &GpuPlane, factor: usize) -> GpuPlane {
         let out = self.plane(src.w / factor, src.h / factor);
-        let p = Params {
-            sw: src.w as u32,
-            i: [factor as u32, 0, 0, 0],
-            ..params(out.w, out.h)
-        };
+        let p = Params { sw: src.w as u32, i: [factor as u32, 0, 0, 0], ..params(out.w, out.h) };
         self.run(kernel!("downbox"), p, &[&src.buf, &out.buf], out.w, out.h);
+        out
+    }
+    fn downsample_rgb(&self, src: &GpuRgb, factor: usize) -> GpuRgb {
+        let out = self.rgb(src.w / factor, src.h / factor);
+        let p = Params { sw: src.w as u32, i: [factor as u32, 0, 0, 0], ..params(out.w, out.h) };
+        self.run(kernel!("downbox_rgb"), p, &[&src.buf, &out.buf], out.w, out.h);
         out
     }
     fn sub(&self, a: &GpuPlane, b: &GpuPlane) -> GpuPlane {
@@ -289,25 +230,13 @@ impl Backend for Gpu {
     fn merge(&self, planes: &[GpuPlane; 3]) -> GpuRgb {
         let (w, h) = (planes[0].w, planes[0].h);
         let out = self.rgb(w, h);
-        self.run(
-            kernel!("merge"),
-            params(w, h),
-            &[&planes[0].buf, &planes[1].buf, &planes[2].buf, &out.buf],
-            w,
-            h,
-        );
+        self.run(kernel!("merge"), params(w, h), &[&planes[0].buf, &planes[1].buf, &planes[2].buf, &out.buf], w, h);
         out
     }
     fn sum_squares(&self, planes: &[GpuPlane; 3]) -> GpuPlane {
         let (w, h) = (planes[0].w, planes[0].h);
         let out = self.plane(w, h);
-        self.run(
-            kernel!("sumsq3"),
-            params(w, h),
-            &[&planes[0].buf, &planes[1].buf, &planes[2].buf, &out.buf],
-            w,
-            h,
-        );
+        self.run(kernel!("sumsq3"), params(w, h), &[&planes[0].buf, &planes[1].buf, &planes[2].buf, &out.buf], w, h);
         out
     }
     fn argmax_update(
@@ -318,17 +247,8 @@ impl Backend for Gpu {
         focus: &GpuPlane,
         index: usize,
     ) {
-        let p = Params {
-            i: [index as u32, 0, 0, 0],
-            ..params(best.w, best.h)
-        };
-        self.run(
-            kernel!("argmax"),
-            p,
-            &[&best.buf, &sum.buf, &depth.buf, &focus.buf],
-            best.w,
-            best.h,
-        );
+        let p = Params { i: [index as u32, 0, 0, 0], ..params(best.w, best.h) };
+        self.run(kernel!("argmax"), p, &[&best.buf, &sum.buf, &depth.buf, &focus.buf], best.w, best.h);
     }
     fn fuse(
         &self,
@@ -349,26 +269,14 @@ impl Backend for Gpu {
                 (&*dummy, 0)
             }
         };
-        let p = Params {
-            i: [index as u32, flag, 0, 0],
-            ..params(w, h)
-        };
-        self.run(
-            kernel!("fuse_energy"),
-            p,
-            &[&fused_energy.buf, &energy.buf, &mask.buf, map],
-            w,
-            h,
-        );
+        let p = Params { i: [index as u32, flag, 0, 0], ..params(w, h) };
+        self.run(kernel!("fuse_energy"), p, &[&fused_energy.buf, &energy.buf, &mask.buf, map], w, h);
         for (dst, src) in fused.iter_mut().zip(level) {
             self.run(kernel!("select"), params(w, h), &[&dst.buf, &src.buf, &mask.buf], w, h);
         }
     }
     fn blend(&self, out: &mut GpuRgb, frame: &GpuRgb, depth: &GpuPlane, index: usize) {
-        let p = Params {
-            i: [index as u32, 0, 0, 0],
-            ..params(out.w, out.h)
-        };
+        let p = Params { i: [index as u32, 0, 0, 0], ..params(out.w, out.h) };
         self.run(kernel!("blend"), p, &[&out.buf, &frame.buf, &depth.buf], out.w, out.h);
     }
 }
@@ -420,43 +328,18 @@ mod tests {
         }
         let t = Affine::similarity((33.0, 22.0), 0.97, 0.02, (1.3, -0.6));
         let rect = Rect::new(3, 2, 50, 30);
-        assert_close(
-            g.download_rgb(&g.warp(&gi, &t, rect)).data(),
-            Cpu.warp(&img, &t, rect).data(),
-            1e-3,
-            "warp",
-        );
+        assert_close(g.download_rgb(&g.warp(&gi, &t, rect)).data(), Cpu.warp(&img, &t, rect).data(), 1e-3, "warp");
         assert_close(&dp(&g.luminance(&gi)), Cpu.luminance(&img).data(), 1e-6, "luminance");
-        assert_close(
-            &dp(&gaussian_blur(g, &gp, 1.5)),
-            gaussian_blur(&Cpu, &plane, 1.5).data(),
-            1e-5,
-            "gaussian",
-        );
+        assert_close(&dp(&gaussian_blur(g, &gp, 1.5)), gaussian_blur(&Cpu, &plane, 1.5).data(), 1e-5, "gaussian");
         assert_close(&dp(&box_blur(g, &gp, 4)), box_blur(&Cpu, &plane, 4).data(), 1e-5, "box");
         for square in [false, true] {
-            assert_close(
-                &dp(&g.laplacian(&gp, square)),
-                Cpu.laplacian(&plane, square).data(),
-                1e-5,
-                "laplacian",
-            );
+            assert_close(&dp(&g.laplacian(&gp, square)), Cpu.laplacian(&plane, square).data(), 1e-5, "laplacian");
         }
         let reduced = Cpu.reduce(&plane);
         assert_close(&dp(&g.reduce(&gp)), reduced.data(), 1e-5, "reduce");
         let gr = g.upload_plane(&reduced);
-        assert_close(
-            &dp(&g.expand(&gr, w, h)),
-            Cpu.expand(&reduced, w, h).data(),
-            1e-5,
-            "expand",
-        );
-        assert_close(
-            &dp(&g.downsample_box(&gp, 3)),
-            Cpu.downsample_box(&plane, 3).data(),
-            1e-5,
-            "downsample",
-        );
+        assert_close(&dp(&g.expand(&gr, w, h)), Cpu.expand(&reduced, w, h).data(), 1e-5, "expand");
+        assert_close(&dp(&g.downsample_box(&gp, 3)), Cpu.downsample_box(&plane, 3).data(), 1e-5, "downsample");
         assert_close(&dp(&g.sub(&gp, &go)), Cpu.sub(&plane, &other).data(), 1e-6, "sub");
 
         let (mut ga, mut ca) = (g.upload_plane(&plane), plane.clone());
@@ -478,12 +361,7 @@ mod tests {
             assert_close(&dp(&split[c]), cpu_split[c].data(), 0.0, "split");
         }
         assert_close(g.download_rgb(&g.merge(&split)).data(), img.data(), 0.0, "merge");
-        assert_close(
-            &dp(&g.sum_squares(&split)),
-            Cpu.sum_squares(&cpu_split).data(),
-            1e-5,
-            "sum_squares",
-        );
+        assert_close(&dp(&g.sum_squares(&split)), Cpu.sum_squares(&cpu_split).data(), 1e-5, "sum_squares");
     }
 
     #[test]
@@ -492,11 +370,7 @@ mod tests {
         let (w, h) = (40, 30);
         let focus: Vec<Plane> = (0..3).map(|i| noise(w, h, 20 + i)).collect();
         let (mut cb, mut cs, mut cd) = (focus[0].clone(), focus[0].clone(), Plane::new(w, h));
-        let (mut gb, mut gs, mut gd) = (
-            g.upload_plane(&focus[0]),
-            g.upload_plane(&focus[0]),
-            g.zeros_plane(w, h),
-        );
+        let (mut gb, mut gs, mut gd) = (g.upload_plane(&focus[0]), g.upload_plane(&focus[0]), g.zeros_plane(w, h));
         for (i, f) in focus.iter().enumerate().skip(1) {
             Cpu.argmax_update(&mut cb, &mut cs, &mut cd, f, i);
             g.argmax_update(&mut gb, &mut gs, &mut gd, &g.upload_plane(f), i);
@@ -515,21 +389,9 @@ mod tests {
         let mut g_map = g.zeros_plane(w, h);
         Cpu.fuse(&mut c_fused, &mut c_energy, &level, &energy, Some(&mut c_map), 5);
         let g_level = level.each_ref().map(|p| g.upload_plane(p));
-        g.fuse(
-            &mut g_fused,
-            &mut g_energy,
-            &g_level,
-            &g.upload_plane(&energy),
-            Some(&mut g_map),
-            5,
-        );
+        g.fuse(&mut g_fused, &mut g_energy, &g_level, &g.upload_plane(&energy), Some(&mut g_map), 5);
         for c in 0..3 {
-            assert_close(
-                g.download_plane(&g_fused[c]).data(),
-                c_fused[c].data(),
-                0.0,
-                "fuse level",
-            );
+            assert_close(g.download_plane(&g_fused[c]).data(), c_fused[c].data(), 0.0, "fuse level");
         }
         assert_close(g.download_plane(&g_energy).data(), c_energy.data(), 0.0, "fuse energy");
         assert_close(g.download_plane(&g_map).data(), c_map.data(), 0.0, "fuse map");
@@ -553,22 +415,13 @@ mod tests {
         let (_, frames) = banded_stack(96, 64, 3);
         for method in [Method::DEFAULT_DEPTH_MAP, Method::DEFAULT_PYRAMID] {
             let run = |use_gpu| {
-                let settings = StackSettings {
-                    method,
-                    align: false,
-                    use_gpu,
-                };
+                let settings = StackSettings { method, align: false, use_gpu };
                 stack(&frames, &settings, &|_| {}, &CancelToken::default()).unwrap()
             };
             let (cpu, gpu) = (run(false), run(true));
             assert!(gpu.backend.starts_with("GPU"), "{}", gpu.backend);
             assert_close(gpu.image.data(), cpu.image.data(), 1e-4, &format!("{method:?} image"));
-            assert_close(
-                gpu.depth_map.data(),
-                cpu.depth_map.data(),
-                1e-3,
-                &format!("{method:?} depth"),
-            );
+            assert_close(gpu.depth_map.data(), cpu.depth_map.data(), 1e-3, &format!("{method:?} depth"));
         }
     }
 }

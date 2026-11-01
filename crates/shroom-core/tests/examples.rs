@@ -30,11 +30,8 @@ fn stacks() -> Vec<PathBuf> {
         eprintln!("examples/ not found, skipping");
         return Vec::new();
     };
-    let mut stacks: Vec<_> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.is_dir())
-        .collect();
+    let mut stacks: Vec<_> =
+        std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.is_dir()).collect();
     stacks.sort();
     stacks
 }
@@ -92,11 +89,7 @@ fn raw_to_linear_dng_roundtrip() {
     // render different colours (missing ForwardMatrix → oversaturated in Lightroom).
     let root = |p: &Path| {
         let source = rawler::rawsource::RawSource::new(p).unwrap();
-        rawler::get_decoder(&source)
-            .unwrap()
-            .ifd(rawler::decoders::WellKnownIFD::Root)
-            .unwrap()
-            .unwrap()
+        rawler::get_decoder(&source).unwrap().ifd(rawler::decoders::WellKnownIFD::Root).unwrap().unwrap()
     };
     let (src_root, out_root) = (root(&input), root(&out));
     for tag in [

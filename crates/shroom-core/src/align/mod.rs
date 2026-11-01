@@ -16,7 +16,7 @@ use estimate::AlignImage;
 use crate::compute::{Backend, Cpu};
 use crate::error::{Error, Result};
 use crate::image::{Rect, RgbImage};
-use crate::stack::{CancelToken, FrameSource, Progress, Stage};
+use crate::stack::{CancelToken, FrameSource, Progress, Snapshot, Stage};
 
 /// Longer side of the downscaled images used for estimation.
 const WORKING_SIZE: usize = 2048;
@@ -34,7 +34,7 @@ pub struct Alignment {
 
 /// Estimates the alignment of all frames of `source` (on the CPU).
 pub fn align_frames(source: &dyn FrameSource, progress: &dyn Fn(Progress), cancel: &CancelToken) -> Result<Alignment> {
-    align_with(&Cpu, source, progress, cancel)
+    align_with(&Cpu, source, progress, None, cancel)
 }
 
 /// Estimates the alignment using `backend` for preparing the frames; the estimation
@@ -43,15 +43,10 @@ pub(crate) fn align_with<B: Backend>(
     backend: &B,
     source: &dyn FrameSource,
     progress: &dyn Fn(Progress),
+    snapshot: Option<&dyn Fn(Snapshot)>,
     cancel: &CancelToken,
 ) -> Result<Alignment> {
-    let ctx = crate::stack::Context {
-        backend,
-        source,
-        alignment: None,
-        progress,
-        cancel,
-    };
+    let ctx = crate::stack::Context::new(backend, source, None, progress, snapshot, cancel);
     let mut size = None;
     let mut previous: Option<AlignImage> = None;
     let mut transforms = Vec::with_capacity(source.len());
@@ -60,6 +55,7 @@ pub(crate) fn align_with<B: Backend>(
         let factor = estimate::working_factor(w, h, WORKING_SIZE);
         let small = backend.downsample_box(&backend.luminance(&frame), factor);
         let current = AlignImage::from_working(backend.download_plane(&small), factor);
+        ctx.snapshot(Stage::Aligning, i, &frame, None, false);
         let Some(prev) = &previous else {
             transforms.push(Affine::IDENTITY);
             previous = Some(current);
@@ -137,10 +133,7 @@ mod tests {
         // A frame magnified 2× about the centre only covers the middle half.
         let zoom = Affine::similarity((49.5, 24.5), 2.0, 0.0, (0.0, 0.0));
         let r = common_area(&[Affine::IDENTITY, zoom], 100, 50).unwrap();
-        assert!(
-            r.x >= 25 && r.x + r.width <= 75 && r.y >= 12 && r.y + r.height <= 38,
-            "{r:?}"
-        );
+        assert!(r.x >= 25 && r.x + r.width <= 75 && r.y >= 12 && r.y + r.height <= 38, "{r:?}");
         assert!(common_area(&[Affine::IDENTITY, Affine::translation(200.0, 0.0)], 100, 50).is_none());
     }
 
@@ -174,22 +167,11 @@ mod tests {
             }
         }
         // Aligned frames all show the same content.
-        let aligned = AlignedFrames {
-            source: &frames,
-            alignment: &alignment,
-        };
+        let aligned = AlignedFrames { source: &frames, alignment: &alignment };
         let (first, last) = (aligned.load(0).unwrap(), aligned.load(4).unwrap());
-        assert_eq!(
-            (first.width(), first.height()),
-            (alignment.crop.width, alignment.crop.height)
-        );
-        let err = first
-            .data()
-            .iter()
-            .zip(last.data())
-            .map(|(a, b)| (a - b).abs())
-            .sum::<f32>()
-            / first.data().len() as f32;
+        assert_eq!((first.width(), first.height()), (alignment.crop.width, alignment.crop.height));
+        let err =
+            first.data().iter().zip(last.data()).map(|(a, b)| (a - b).abs()).sum::<f32>() / first.data().len() as f32;
         assert!(err < 0.002, "mean difference after alignment {err}");
     }
 
@@ -197,21 +179,13 @@ mod tests {
     fn stacking_with_alignment_outputs_the_common_area() {
         use crate::stack::{Method, StackSettings, stack};
         let (_, frames) = breathing_stack(4);
-        let settings = StackSettings {
-            use_gpu: false,
-            ..StackSettings::new(Method::DEFAULT_PYRAMID)
-        };
+        let settings = StackSettings { use_gpu: false, ..StackSettings::new(Method::DEFAULT_PYRAMID) };
         let result = stack(&frames, &settings, &|_| {}, &CancelToken::default()).unwrap();
         let crop = result.alignment.unwrap().crop;
         assert_eq!((result.image.width(), result.image.height()), (crop.width, crop.height));
         // All frames show the same (smooth) scene, so the stack equals the aligned first frame.
         let first = frames.0[0].crop(crop);
-        let err = first
-            .data()
-            .iter()
-            .zip(result.image.data())
-            .map(|(a, b)| (a - b).abs())
-            .sum::<f32>()
+        let err = first.data().iter().zip(result.image.data()).map(|(a, b)| (a - b).abs()).sum::<f32>()
             / first.data().len() as f32;
         assert!(err < 0.002, "{err}");
     }

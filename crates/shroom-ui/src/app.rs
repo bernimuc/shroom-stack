@@ -2,13 +2,19 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 
 use eframe::egui::{self, Color32, RichText, Vec2};
-use shroom_core::stack::Method;
+use shroom_core::render::render_depth_map;
+use shroom_core::stack::{Method, Progress, StackSettings, Stage};
 
 use crate::frames::{FrameList, Issue, Severity, preflight};
-use crate::loader::{Loaded, Loader};
+use crate::loader::{FullRequest, Loaded, Loader};
+use crate::processing::{Finished, Job, JobError, JobEvent, overall_progress};
 use crate::viewer::{self, Pane, TiledImage, ViewState};
+
+const ERROR_COLOR: Color32 = Color32::from_rgb(255, 110, 110);
+const WARNING_COLOR: Color32 = Color32::from_rgb(240, 200, 90);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Workspace {
@@ -34,38 +40,44 @@ struct Parameters {
 
 impl Default for Parameters {
     fn default() -> Self {
-        let Method::DepthMap { radius, smoothing } = Method::DEFAULT_DEPTH_MAP else {
-            unreachable!()
-        };
-        let Method::Pyramid {
-            smoothing: pyramid_smoothing,
-        } = Method::DEFAULT_PYRAMID
-        else {
-            unreachable!()
-        };
-        Self {
-            kind: MethodKind::DepthMap,
-            radius,
-            depth_smoothing: smoothing,
-            pyramid_smoothing,
-            align: true,
-        }
+        let Method::DepthMap { radius, smoothing } = Method::DEFAULT_DEPTH_MAP else { unreachable!() };
+        let Method::Pyramid { smoothing: pyramid_smoothing } = Method::DEFAULT_PYRAMID else { unreachable!() };
+        Self { kind: MethodKind::DepthMap, radius, depth_smoothing: smoothing, pyramid_smoothing, align: true }
     }
 }
 
 impl Parameters {
-    #[allow(dead_code)] // used once processing is wired up
     fn method(&self) -> Method {
         match self.kind {
-            MethodKind::DepthMap => Method::DepthMap {
-                radius: self.radius,
-                smoothing: self.depth_smoothing,
-            },
-            MethodKind::Pyramid => Method::Pyramid {
-                smoothing: self.pyramid_smoothing,
-            },
+            MethodKind::DepthMap => Method::DepthMap { radius: self.radius, smoothing: self.depth_smoothing },
+            MethodKind::Pyramid => Method::Pyramid { smoothing: self.pyramid_smoothing },
         }
     }
+}
+
+/// A running stack job and its latest live images.
+struct Running {
+    job: Job,
+    settings: StackSettings,
+    progress: Option<Progress>,
+    frame: Option<TiledImage>,
+    map: Option<TiledImage>,
+    /// Full-resolution size of what the live images show.
+    size: Vec2,
+    stage: Stage,
+}
+
+/// A finished stack shown in Postprocessing.
+struct Done {
+    finished: Box<Finished>,
+    image: TiledImage,
+    map: TiledImage,
+}
+
+/// Questions that need a confirmation before results are discarded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Confirm {
+    DiscardResult,
 }
 
 pub struct ShroomApp {
@@ -74,11 +86,20 @@ pub struct ShroomApp {
     selected: Option<usize>,
     /// Embedded previews (about 1024 px) as textures, by file.
     thumbs: HashMap<PathBuf, TiledImage>,
-    /// Full-resolution rendering of the selected frame.
-    full: Option<(PathBuf, TiledImage)>,
+    /// Full-resolution rendering of the selected frame (aligned to the result in
+    /// Postprocessing).
+    full: Option<(FullRequest, TiledImage)>,
     view: ViewState,
     params: Parameters,
     issues: Option<Vec<Issue>>,
+    /// Outcome of the last action, shown in the toolbar (`true` = error).
+    status: Option<(bool, String)>,
+    running: Option<Running>,
+    done: Option<Done>,
+    confirm: Option<Confirm>,
+    /// Show the depth/source map instead of the result in Postprocessing.
+    show_map: bool,
+    saving: Option<Receiver<Result<PathBuf, String>>>,
     loader: Loader,
 }
 
@@ -94,6 +115,12 @@ impl ShroomApp {
             view: ViewState::default(),
             params: Parameters::default(),
             issues: None,
+            status: None,
+            running: None,
+            done: None,
+            confirm: None,
+            show_map: false,
+            saving: None,
             loader: Loader::new(cc.egui_ctx.clone()),
         };
         app.add_files(files);
@@ -104,13 +131,26 @@ impl ShroomApp {
     /// frame's full-resolution preview have arrived).
     #[cfg(test)]
     pub fn is_idle(&self) -> bool {
-        !self.frames.is_loading() && (self.selected.is_none() || self.full.is_some())
+        !self.frames.is_loading()
+            && self.running.is_none()
+            && self.saving.is_none()
+            && (self.selected.is_none()
+                || self.full.as_ref().is_some_and(|(r, _)| Some(r) == self.full_request().as_ref()))
+    }
+
+    #[cfg(test)]
+    pub fn workspace(&self) -> Workspace {
+        self.workspace
+    }
+
+    /// Whether the running job has delivered live images for both panes.
+    #[cfg(test)]
+    pub fn has_live_map(&self) -> bool {
+        self.running.as_ref().is_some_and(|r| r.frame.is_some() && r.map.is_some())
     }
 
     fn add_files(&mut self, paths: Vec<PathBuf>) {
-        let dngs = paths
-            .into_iter()
-            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dng")));
+        let dngs = paths.into_iter().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dng")));
         for path in self.frames.add(dngs) {
             self.loader.request_info(path);
         }
@@ -122,17 +162,43 @@ impl ShroomApp {
 
     fn select(&mut self, index: Option<usize>) {
         self.selected = index;
-        if let Some(path) = self.selected_path()
-            && self.full.as_ref().is_none_or(|(p, _)| *p != path)
+        if let Some(request) = self.full_request()
+            && self.full.as_ref().is_none_or(|(r, _)| *r != request)
         {
-            self.loader.request_full(path);
+            self.loader.request_full(request);
         }
     }
 
+    /// What the preview of the selected frame should show: the frame as is, or aligned
+    /// to the result in Postprocessing.
+    fn full_request(&self) -> Option<FullRequest> {
+        let index = self.selected?;
+        let path = self.frames.frames.get(index)?.path.clone();
+        let aligned = match (&self.done, self.workspace) {
+            (Some(done), Workspace::Postprocessing) => {
+                let result = &done.finished.result;
+                let i = done.finished.paths.iter().position(|p| *p == path)?;
+                Some(match &result.alignment {
+                    Some(a) => (a.transforms[i], a.crop),
+                    None => (
+                        shroom_core::align::Affine::IDENTITY,
+                        shroom_core::Rect::new(0, 0, result.image.width(), result.image.height()),
+                    ),
+                })
+            }
+            _ => None,
+        };
+        Some(FullRequest { path, aligned })
+    }
+
+    fn set_workspace(&mut self, workspace: Workspace) {
+        self.workspace = workspace;
+        self.view = ViewState::default();
+        self.select(self.selected);
+    }
+
     fn selected_path(&self) -> Option<PathBuf> {
-        self.selected
-            .and_then(|i| self.frames.frames.get(i))
-            .map(|f| f.path.clone())
+        self.selected.and_then(|i| self.frames.frames.get(i)).map(|f| f.path.clone())
     }
 
     fn receive(&mut self, ctx: &egui::Context) {
@@ -142,8 +208,7 @@ impl ShroomApp {
                     if let Ok(info) = &result
                         && let Some(preview) = &info.preview
                     {
-                        self.thumbs
-                            .insert(path.clone(), TiledImage::new(ctx, &path.to_string_lossy(), preview));
+                        self.thumbs.insert(path.clone(), TiledImage::new(ctx, &path.to_string_lossy(), preview));
                     }
                     self.frames.set_info(&path, result);
                     // Keep the list in shooting order while files arrive.
@@ -151,15 +216,139 @@ impl ShroomApp {
                     self.frames.sort_by_capture_time();
                     self.selected = selected.and_then(|p| self.frames.frames.iter().position(|f| f.path == p));
                 }
-                Loaded::Full(path, Ok(img)) if Some(&path) == self.selected_path().as_ref() => {
-                    self.full = Some((
-                        path.clone(),
-                        TiledImage::new(ctx, &format!("full:{}", path.display()), &img),
-                    ));
+                Loaded::Full(request, Ok(img)) if Some(&request) == self.full_request().as_ref() => {
+                    let name = format!("full:{}", request.path.display());
+                    self.full = Some((request, TiledImage::new(ctx, &name, &img)));
                 }
                 Loaded::Full(..) => {}
             }
         }
+        self.receive_job(ctx);
+        if let Some(rx) = &self.saving
+            && let Ok(result) = rx.try_recv()
+        {
+            self.status = Some(match result {
+                Ok(path) => (false, format!("Saved {}", path.display())),
+                Err(e) => (true, format!("Saving failed: {e}")),
+            });
+            self.saving = None;
+        }
+    }
+
+    fn receive_job(&mut self, ctx: &egui::Context) {
+        let Some(running) = &mut self.running else { return };
+        let max_index = self.frames.frames.len().saturating_sub(1) as f32;
+        let color = self.frames.frames.first().and_then(|f| f.info.as_ref()).map(|i| i.color.clone());
+        for event in running.job.poll() {
+            match event {
+                JobEvent::Progress(p) => running.progress = Some(p),
+                JobEvent::Snapshot(snap) => {
+                    let color = color.clone().unwrap_or_default();
+                    let frame = shroom_core::render::render_display(&snap.frame, &color, None);
+                    running.frame = Some(TiledImage::new(ctx, "live:frame", &frame));
+                    running.map =
+                        snap.map.map(|m| TiledImage::new(ctx, "live:map", &render_depth_map(&m, max_index, None)));
+                    running.size = Vec2::new(snap.full_size.0 as f32, snap.full_size.1 as f32);
+                    if running.stage != snap.stage {
+                        running.stage = snap.stage;
+                        self.view = ViewState::default();
+                    }
+                }
+                JobEvent::Done(outcome) => {
+                    self.running = None;
+                    match outcome {
+                        Ok(finished) => {
+                            let image = TiledImage::new(ctx, "result", &finished.display);
+                            let map = render_depth_map(&finished.result.depth_map, max_index, Some(2048));
+                            let map = TiledImage::new(ctx, "result:map", &map);
+                            self.status = Some((
+                                false,
+                                format!(
+                                    "Stacked {} images in {:.1} s ({})",
+                                    finished.paths.len(),
+                                    finished.elapsed.as_secs_f32(),
+                                    finished.result.backend
+                                ),
+                            ));
+                            self.done = Some(Done { finished, image, map });
+                            self.set_workspace(Workspace::Postprocessing);
+                        }
+                        Err(JobError::Cancelled) => {
+                            self.status = Some((false, "Stacking cancelled.".into()));
+                            self.set_workspace(Workspace::Preparation);
+                        }
+                        Err(JobError::Failed(e)) => {
+                            self.status = Some((true, format!("Stacking failed: {e}")));
+                            self.set_workspace(Workspace::Preparation);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Runs the preflight checks and starts stacking if they pass.
+    fn render(&mut self, ctx: &egui::Context) {
+        let issues = preflight(&self.frames);
+        let ok = issues.iter().all(|i| i.severity != Severity::Error);
+        self.issues = Some(issues);
+        self.status = None;
+        if !ok {
+            return;
+        }
+        let settings = StackSettings { method: self.params.method(), align: self.params.align, use_gpu: true };
+        let color = self.frames.frames[0].info.as_ref().map(|i| i.color.clone()).unwrap_or_default();
+        let paths = self.frames.frames.iter().map(|f| f.path.clone()).collect();
+        self.running = Some(Running {
+            job: Job::start(ctx.clone(), paths, settings, color),
+            settings,
+            progress: None,
+            frame: None,
+            map: None,
+            size: Vec2::ZERO,
+            stage: Stage::Aligning,
+        });
+        self.set_workspace(Workspace::Processing);
+    }
+
+    fn save(&mut self) {
+        let Some(done) = &self.done else { return };
+        let first = &done.finished.paths[0];
+        let name = format!("{}-stacked.dng", first.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default());
+        let mut dialog = rfd::FileDialog::new().add_filter("DNG", &["dng"]).set_file_name(name);
+        if let Some(dir) = first.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else { return };
+        self.save_to(path);
+    }
+
+    fn save_to(&mut self, path: PathBuf) {
+        let Some(done) = &self.done else { return };
+        let (image, template) = (done.finished.result.image.clone(), done.finished.template.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let software = concat!("Shroom Stack ", env!("CARGO_PKG_VERSION"));
+            let result = shroom_core::io::write_linear_dng(&path, &image, &template, software)
+                .map(|()| path)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+        self.saving = Some(rx);
+        self.status = Some((false, "Saving…".into()));
+    }
+
+    #[cfg(test)]
+    pub fn save_for_test(&mut self, path: PathBuf) {
+        self.save_to(path);
+    }
+
+    fn discard_result(&mut self) {
+        self.done = None;
+        self.status = None;
+        self.issues = None;
+        self.set_workspace(Workspace::Preparation);
     }
 }
 
@@ -168,14 +357,9 @@ impl eframe::App for ShroomApp {
         let ctx = ui.ctx().clone();
         self.receive(&ctx);
         let dropped: Vec<PathBuf> = ctx.input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .map(|f| f.path().to_path_buf())
-                .filter(|p| !p.as_os_str().is_empty())
-                .collect()
+            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
         });
-        if !dropped.is_empty() {
+        if !dropped.is_empty() && self.workspace == Workspace::Preparation {
             self.add_files(dropped);
         }
 
@@ -186,6 +370,7 @@ impl eframe::App for ShroomApp {
             .min_size(220.0)
             .show(ui, |ui| self.file_list(ui));
         egui::CentralPanel::default().show(ui, |ui| self.preview(ui));
+        self.confirm_dialog(&ctx);
     }
 }
 
@@ -200,16 +385,37 @@ impl ShroomApp {
                 (Workspace::Processing, "Processing"),
                 (Workspace::Postprocessing, "Postprocessing"),
             ] {
-                // Only Preparation is reachable until a stack has been processed.
-                let enabled = ws == Workspace::Preparation;
+                // Preparation is left only by rendering; Postprocessing needs a result.
+                let enabled = match ws {
+                    Workspace::Preparation => self.running.is_none(),
+                    Workspace::Processing => self.running.is_some(),
+                    Workspace::Postprocessing => self.done.is_some(),
+                };
                 ui.add_enabled_ui(enabled, |ui| {
-                    if ui.selectable_label(self.workspace == ws, label).clicked() {
-                        self.workspace = ws;
+                    if ui.selectable_label(self.workspace == ws, label).clicked() && self.workspace != ws {
+                        if ws == Workspace::Preparation && self.done.is_some() {
+                            self.confirm = Some(Confirm::DiscardResult);
+                        } else {
+                            self.set_workspace(ws);
+                        }
                     }
                 });
             }
         });
         ui.add_space(2.0);
+        match self.workspace {
+            Workspace::Preparation => self.preparation_toolbar(ui),
+            Workspace::Processing => self.processing_toolbar(ui),
+            Workspace::Postprocessing => self.postprocessing_toolbar(ui),
+        }
+        if let Some((error, message)) = &self.status {
+            ui.colored_label(if *error { ERROR_COLOR } else { Color32::LIGHT_GREEN }, message);
+        }
+        ui.add_space(4.0);
+    }
+
+    fn preparation_toolbar(&mut self, ui: &mut egui::Ui) {
+        let mut render = false;
         ui.horizontal(|ui| {
             let method_label = ui.label("Method");
             let p = &mut self.params;
@@ -233,10 +439,9 @@ impl ShroomApp {
                     ui.add(egui::DragValue::new(&mut p.radius).range(1..=32))
                         .on_hover_text("Size of the area judged for sharpness. Larger is smoother but less precise.");
                     ui.label("Smoothing");
-                    ui.add(egui::DragValue::new(&mut p.depth_smoothing).range(0..=20))
-                        .on_hover_text(
-                            "How strongly the depth map is smoothed. Higher hides artefacts in smooth areas.",
-                        );
+                    ui.add(egui::DragValue::new(&mut p.depth_smoothing).range(0..=20)).on_hover_text(
+                        "How strongly the depth map is smoothed. Higher hides artefacts in smooth areas.",
+                    );
                 }
                 MethodKind::Pyramid => {
                     ui.label("Smoothing");
@@ -248,72 +453,138 @@ impl ShroomApp {
             ui.checkbox(&mut p.align, "Align frames")
                 .on_hover_text("Compensates shifts and focus breathing between frames (recommended).");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let render = ui.add(egui::Button::new(RichText::new("Render").strong()).min_size(Vec2::new(90.0, 0.0)));
-                if render.clicked() {
-                    self.issues = Some(preflight(&self.frames));
-                }
+                render = ui
+                    .add(egui::Button::new(RichText::new("Render").strong()).min_size(Vec2::new(90.0, 0.0)))
+                    .clicked();
             });
         });
+        if render {
+            self.render(ui.ctx());
+        }
         if let Some(issues) = &self.issues {
-            ui.add_space(2.0);
-            if issues.iter().all(|i| i.severity != Severity::Error) {
-                ui.colored_label(
-                    Color32::LIGHT_GREEN,
-                    "Ready to stack. (Processing is the next milestone.)",
-                );
-            }
             for issue in issues {
                 let (kind, color) = match issue.severity {
-                    Severity::Error => ("Error", Color32::from_rgb(255, 110, 110)),
-                    Severity::Warning => ("Warning", Color32::from_rgb(240, 200, 90)),
+                    Severity::Error => ("Error", ERROR_COLOR),
+                    Severity::Warning => ("Warning", WARNING_COLOR),
                 };
                 ui.colored_label(color, format!("{kind}: {}", issue.message));
             }
         }
-        ui.add_space(4.0);
+    }
+
+    fn processing_toolbar(&mut self, ui: &mut egui::Ui) {
+        let Some(running) = &self.running else { return };
+        ui.horizontal(|ui| {
+            let compositing = matches!(running.settings.method, Method::DepthMap { .. });
+            let (fraction, text) = match &running.progress {
+                Some(p) => overall_progress(p, running.settings.align, compositing),
+                None => (0.0, "Starting…".into()),
+            };
+            let text = if running.job.is_cancelling() { "Cancelling…".into() } else { text };
+            let cancel = ui.add_enabled(!running.job.is_cancelling(), egui::Button::new("Cancel"));
+            ui.add(egui::ProgressBar::new(fraction).text(text).desired_width(ui.available_width()));
+            if cancel.clicked() {
+                running.job.cancel();
+            }
+        });
+    }
+
+    fn postprocessing_toolbar(&mut self, ui: &mut egui::Ui) {
+        let Some(done) = &self.done else { return };
+        let mut save = false;
+        let mut new_stack = false;
+        ui.horizontal(|ui| {
+            let s = &done.finished.settings;
+            let method = match s.method {
+                Method::DepthMap { radius, smoothing } => format!("Depth map (radius {radius}, smoothing {smoothing})"),
+                Method::Pyramid { smoothing } => format!("Pyramid (smoothing {smoothing})"),
+            };
+            let img = &done.finished.result.image;
+            ui.label(format!("{method} · {} images · {}×{}", done.finished.paths.len(), img.width(), img.height()));
+            ui.separator();
+            ui.checkbox(&mut self.show_map, "Show depth map")
+                .on_hover_text("Which frame each part of the result comes from (blue = first, red = last).");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                save = ui
+                    .add_enabled(self.saving.is_none(), egui::Button::new(RichText::new("Save…").strong()))
+                    .on_hover_text("Save the result as Linear DNG")
+                    .clicked();
+                new_stack =
+                    ui.button("New stack").on_hover_text("Back to Preparation (discards this result)").clicked();
+            });
+        });
+        if save {
+            self.save();
+        }
+        if new_stack {
+            self.confirm = Some(Confirm::DiscardResult);
+        }
+    }
+
+    fn confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(Confirm::DiscardResult) = self.confirm else { return };
+        let mut answer = None;
+        let modal = egui::Modal::new(egui::Id::unique("confirm-discard")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading("Discard the result?");
+            ui.label("Going back to Preparation discards the stacked image. Save it first if you want to keep it.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Discard").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Keep").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if modal.should_close() && answer.is_none() {
+            answer = Some(false);
+        }
+        match answer {
+            Some(true) => {
+                self.confirm = None;
+                self.discard_result();
+            }
+            Some(false) => self.confirm = None,
+            None => {}
+        }
     }
 
     fn file_list(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Add images…").clicked()
-                && let Some(paths) = rfd::FileDialog::new().add_filter("DNG", &["dng", "DNG"]).pick_files()
-            {
-                self.add_files(paths);
-            }
-            let has = self.selected.is_some();
-            if ui.add_enabled(has, egui::Button::new("Remove")).clicked() {
-                let i = self.selected.unwrap();
-                self.frames.remove(i);
-                self.issues = None;
-                let next = if self.frames.frames.is_empty() {
-                    None
-                } else {
-                    Some(i.min(self.frames.frames.len() - 1))
-                };
-                self.select(next);
-            }
-            if ui
-                .add_enabled(has, egui::Button::new("Up"))
-                .on_hover_text("Move up")
-                .clicked()
-            {
-                self.selected = Some(self.frames.shift(self.selected.unwrap(), -1));
-                self.issues = None;
-            }
-            if ui
-                .add_enabled(has, egui::Button::new("Down"))
-                .on_hover_text("Move down")
-                .clicked()
-            {
-                self.selected = Some(self.frames.shift(self.selected.unwrap(), 1));
-                self.issues = None;
-            }
-            if ui.button("Reverse").on_hover_text("Reverse the order").clicked() {
-                self.frames.reverse();
-                self.selected = self.selected.map(|i| self.frames.frames.len() - 1 - i);
-                self.issues = None;
-            }
+        let editable = self.workspace == Workspace::Preparation;
+        let processing = self.running.as_ref().and_then(|r| r.progress.map(|p| p.frame));
+        ui.add_enabled_ui(editable, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Add images…").clicked()
+                    && let Some(paths) = rfd::FileDialog::new().add_filter("DNG", &["dng", "DNG"]).pick_files()
+                {
+                    self.add_files(paths);
+                }
+                let has = self.selected.is_some();
+                if ui.add_enabled(has, egui::Button::new("Remove")).clicked() {
+                    let i = self.selected.unwrap();
+                    self.frames.remove(i);
+                    self.issues = None;
+                    let next =
+                        if self.frames.frames.is_empty() { None } else { Some(i.min(self.frames.frames.len() - 1)) };
+                    self.select(next);
+                }
+                if ui.add_enabled(has, egui::Button::new("Up")).on_hover_text("Move up").clicked() {
+                    self.selected = Some(self.frames.shift(self.selected.unwrap(), -1));
+                    self.issues = None;
+                }
+                if ui.add_enabled(has, egui::Button::new("Down")).on_hover_text("Move down").clicked() {
+                    self.selected = Some(self.frames.shift(self.selected.unwrap(), 1));
+                    self.issues = None;
+                }
+                if ui.button("Reverse").on_hover_text("Reverse the order").clicked() {
+                    self.frames.reverse();
+                    self.selected = self.selected.map(|i| self.frames.frames.len() - 1 - i);
+                    self.issues = None;
+                }
+            })
         });
         ui.label(RichText::new(format!("{} images", self.frames.frames.len())).weak());
         ui.separator();
@@ -325,13 +596,12 @@ impl ShroomApp {
                 ui.vertical_centered(|ui| ui.label(RichText::new("Add DNG files or drop them here.").weak()));
             }
             for (i, frame) in self.frames.frames.iter().enumerate() {
-                let selected = self.selected == Some(i);
+                let selected = match processing {
+                    Some(current) => current == i,
+                    None => self.selected == Some(i) && self.workspace != Workspace::Processing,
+                };
                 let row = egui::Frame::new()
-                    .fill(if selected {
-                        ui.visuals().selection.bg_fill
-                    } else {
-                        Color32::TRANSPARENT
-                    })
+                    .fill(if selected { ui.visuals().selection.bg_fill } else { Color32::TRANSPARENT })
                     .inner_margin(4.0)
                     .corner_radius(4.0)
                     .show(ui, |ui| {
@@ -378,12 +648,17 @@ impl ShroomApp {
                 }
             }
         });
+        if self.workspace == Workspace::Processing {
+            return;
+        }
         if let Some(i) = clicked {
             self.select(Some(i));
         }
         // Keyboard navigation through the list.
         let (up, down) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown)));
-        if let Some(i) = self.selected {
+        if self.confirm.is_none()
+            && let Some(i) = self.selected
+        {
             if up && i > 0 {
                 self.select(Some(i - 1));
             } else if down && i + 1 < self.frames.frames.len() {
@@ -393,15 +668,23 @@ impl ShroomApp {
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
+        match self.workspace {
+            Workspace::Preparation => self.preparation_preview(ui),
+            Workspace::Processing => self.processing_preview(ui),
+            Workspace::Postprocessing => self.postprocessing_preview(ui),
+        }
+    }
+
+    /// The selected frame's full-resolution texture, if loaded for the current workspace.
+    fn selected_full(&self) -> Option<&TiledImage> {
+        let request = self.full_request()?;
+        self.full.as_ref().filter(|(r, _)| *r == request).map(|(_, t)| t)
+    }
+
+    fn preparation_preview(&mut self, ui: &mut egui::Ui) {
         let frame = self.selected.and_then(|i| self.frames.frames.get(i));
-        let size = frame
-            .and_then(|f| f.info.as_ref())
-            .map(|i| Vec2::new(i.width as f32, i.height as f32));
-        let full = self
-            .full
-            .as_ref()
-            .filter(|(p, _)| Some(p) == frame.map(|f| &f.path))
-            .map(|(_, t)| t);
+        let size = frame.and_then(|f| f.info.as_ref()).map(|i| Vec2::new(i.width as f32, i.height as f32));
+        let full = self.selected_full();
         let thumb = frame.and_then(|f| self.thumbs.get(&f.path));
         let image = size.and_then(|s| full.or(thumb).map(|t| (t, s)));
         let label = match (frame, full.is_some()) {
@@ -409,19 +692,52 @@ impl ShroomApp {
             (Some(f), false) => format!("{} (loading full resolution…)", f.file_name()),
             (None, _) => String::new(),
         };
-        let placeholder = if frame.is_some() {
-            "Loading…"
-        } else {
-            "No image selected"
+        let placeholder = if frame.is_some() { "Loading…" } else { "No image selected" };
+        let mut view = self.view;
+        viewer::show(ui, &mut view, &[Pane { label: &label, image, placeholder }]);
+        self.view = view;
+    }
+
+    fn processing_preview(&mut self, ui: &mut egui::Ui) {
+        let Some(running) = &self.running else { return };
+        let frame_label =
+            running.progress.and_then(|p| self.frames.frames.get(p.frame)).map(|f| f.file_name()).unwrap_or_default();
+        let map_label = match (running.stage, running.settings.method) {
+            (Stage::Aligning, _) => "",
+            (_, Method::DepthMap { .. }) => "Depth map (blue = first frame, red = last)",
+            (_, Method::Pyramid { .. }) => "Detail source (blue = first frame, red = last)",
         };
-        viewer::show(
-            ui,
-            &mut self.view,
-            &[Pane {
-                label: &label,
-                image,
-                placeholder,
-            }],
-        );
+        let size = running.size;
+        let panes = [
+            Pane { label: &frame_label, image: running.frame.as_ref().map(|t| (t, size)), placeholder: "Starting…" },
+            Pane {
+                label: map_label,
+                image: running.map.as_ref().map(|t| (t, size)),
+                placeholder: "The depth map appears after alignment.",
+            },
+        ];
+        let mut view = self.view;
+        viewer::show(ui, &mut view, &panes);
+        self.view = view;
+    }
+
+    fn postprocessing_preview(&mut self, ui: &mut egui::Ui) {
+        let Some(done) = &self.done else { return };
+        let img = &done.finished.result.image;
+        let size = Vec2::new(img.width() as f32, img.height() as f32);
+        let frame = self.selected.and_then(|i| self.frames.frames.get(i));
+        let left_label = frame.map(|f| format!("{} (aligned)", f.file_name())).unwrap_or_default();
+        let left = self.selected_full();
+        let panes = [
+            Pane { label: &left_label, image: left.map(|t| (t, size)), placeholder: "Loading…" },
+            if self.show_map {
+                Pane { label: "Depth map", image: Some((&done.map, size)), placeholder: "" }
+            } else {
+                Pane { label: "Result", image: Some((&done.image, size)), placeholder: "" }
+            },
+        ];
+        let mut view = self.view;
+        viewer::show(ui, &mut view, &panes);
+        self.view = view;
     }
 }

@@ -10,9 +10,7 @@ pub struct CfaPattern {
 }
 
 impl CfaPattern {
-    pub const RGGB: Self = Self {
-        rows: [[RED, GREEN], [GREEN, BLUE]],
-    };
+    pub const RGGB: Self = Self { rows: [[RED, GREEN], [GREEN, BLUE]] };
 
     /// Parses a pattern name such as `"RGGB"` or `"GBRG"`. Only Bayer patterns (one red,
     /// one blue, two greens) are accepted.
@@ -48,11 +46,7 @@ impl CfaPattern {
 
     fn is_bayer(&self) -> bool {
         let [[a, b], [c, d]] = self.rows;
-        let (greens, others) = if a == GREEN && d == GREEN {
-            ((a, d), (b, c))
-        } else {
-            ((b, c), (a, d))
-        };
+        let (greens, others) = if a == GREEN && d == GREEN { ((a, d), (b, c)) } else { ((b, c), (a, d)) };
         greens == (GREEN, GREEN) && (others == (RED, BLUE) || others == (BLUE, RED))
     }
 }

@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use chrono::NaiveDateTime;
 
 pub(crate) use reader::load_for_stacking;
-pub use reader::{DngTemplate, LinearFrame, RawFrame, decode_raw, load_linear};
+pub use reader::{DngTemplate, LinearFrame, RawFrame, decode_raw, load_linear, read_template};
 pub use writer::write_linear_dng;
 
 use crate::image::DisplayImage;
@@ -29,6 +29,8 @@ pub struct FrameInfo {
     pub height: usize,
     /// Embedded preview (typically 1024 px wide), if present.
     pub preview: Option<DisplayImage>,
+    /// Colour information for rendering the image data.
+    pub color: crate::render::ColorInfo,
 }
 
 /// Reads metadata and the embedded preview without decoding the raw image data.
@@ -38,11 +40,7 @@ pub fn read_frame_info(path: &Path) -> crate::Result<FrameInfo> {
 
 /// Sorts frames into shooting order: by capture time, then by file name.
 pub fn sort_frames(frames: &mut [FrameInfo]) {
-    frames.sort_by(|a, b| {
-        a.capture_time
-            .cmp(&b.capture_time)
-            .then_with(|| a.file_name.cmp(&b.file_name))
-    });
+    frames.sort_by(|a, b| a.capture_time.cmp(&b.capture_time).then_with(|| a.file_name.cmp(&b.file_name)));
 }
 
 #[cfg(test)]
@@ -59,6 +57,7 @@ mod tests {
             width: 0,
             height: 0,
             preview: None,
+            color: Default::default(),
         }
     }
 
@@ -77,11 +76,7 @@ mod tests {
 
     #[test]
     fn frames_without_time_come_first_sorted_by_name() {
-        let mut frames = vec![
-            info("b.dng", None),
-            info("x.dng", Some("2026-01-01 00:00:00.0")),
-            info("a.dng", None),
-        ];
+        let mut frames = vec![info("b.dng", None), info("x.dng", Some("2026-01-01 00:00:00.0")), info("a.dng", None)];
         sort_frames(&mut frames);
         let names: Vec<_> = frames.iter().map(|f| f.file_name.as_str()).collect();
         assert_eq!(names, ["a.dng", "b.dng", "x.dng"]);

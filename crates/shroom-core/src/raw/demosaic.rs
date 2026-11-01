@@ -33,12 +33,7 @@ fn reflect(i: isize, n: usize) -> usize {
 }
 
 fn demosaic_pixel(m: &Plane, pattern: CfaPattern, x: usize, y: usize) -> [f32; 3] {
-    let at = |dx: isize, dy: isize| {
-        m.get(
-            reflect(x as isize + dx, m.width()),
-            reflect(y as isize + dy, m.height()),
-        )
-    };
+    let at = |dx: isize, dy: isize| m.get(reflect(x as isize + dx, m.width()), reflect(y as isize + dy, m.height()));
     let c = at(0, 0);
     let color = pattern.color_at(x, y);
 
@@ -55,19 +50,11 @@ fn demosaic_pixel(m: &Plane, pattern: CfaPattern, x: usize, y: usize) -> [f32; 3
         // Colour of horizontal neighbours vs. vertical neighbours.
         let row_val = (5.0 * c - diag - horiz2 + 0.5 * vert2 + 4.0 * horiz1) / 8.0;
         let col_val = (5.0 * c - diag - vert2 + 0.5 * horiz2 + 4.0 * vert1) / 8.0;
-        if pattern.color_at(x + 1, y) == RED {
-            [row_val, c, col_val]
-        } else {
-            [col_val, c, row_val]
-        }
+        if pattern.color_at(x + 1, y) == RED { [row_val, c, col_val] } else { [col_val, c, row_val] }
     } else {
         let g = (4.0 * c - cross2 + 2.0 * cross1) / 8.0;
         let opposite = (6.0 * c - 1.5 * cross2 + 2.0 * diag) / 8.0;
-        if color == RED {
-            [c, g, opposite]
-        } else {
-            [opposite, g, c]
-        }
+        if color == RED { [c, g, opposite] } else { [opposite, g, c] }
     }
 }
 
@@ -114,11 +101,7 @@ mod tests {
     fn linear_gradients_are_exact_in_interior() {
         let f = |x: usize, y: usize| {
             let (x, y) = (x as f32, y as f32);
-            [
-                0.01 * x + 0.02 * y,
-                0.03 * x - 0.01 * y + 0.5,
-                0.2 + 0.005 * x + 0.015 * y,
-            ]
+            [0.01 * x + 0.02 * y, 0.03 * x - 0.01 * y + 0.5, 0.2 + 0.005 * x + 0.015 * y]
         };
         for name in ["RGGB", "GBRG"] {
             let p = CfaPattern::from_name(name).unwrap();
@@ -127,10 +110,7 @@ mod tests {
                 for x in 2..14 {
                     let (got, want) = (rgb.pixel(x, y), f(x, y));
                     for c in 0..3 {
-                        assert!(
-                            (got[c] - want[c]).abs() < 1e-5,
-                            "{name} {x},{y} c{c}: {got:?} vs {want:?}"
-                        );
+                        assert!((got[c] - want[c]).abs() < 1e-5, "{name} {x},{y} c{c}: {got:?} vs {want:?}");
                     }
                 }
             }
@@ -154,12 +134,7 @@ mod tests {
     fn negative_overshoot_is_clamped() {
         let p = CfaPattern::RGGB;
         // A single bright green pixel creates negative lobes in its neighbourhood.
-        let m = mosaic_from(
-            8,
-            8,
-            p,
-            |x, y| if (x, y) == (3, 4) { [0.0, 1.0, 0.0] } else { [0.0; 3] },
-        );
+        let m = mosaic_from(8, 8, p, |x, y| if (x, y) == (3, 4) { [0.0, 1.0, 0.0] } else { [0.0; 3] });
         assert!(demosaic(&m, p).data().iter().all(|&v| v >= 0.0));
     }
 }

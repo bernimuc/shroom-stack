@@ -16,10 +16,7 @@ pub struct Frame {
 
 impl Frame {
     pub fn file_name(&self) -> String {
-        self.path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
+        self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
     }
 }
 
@@ -34,11 +31,7 @@ impl FrameList {
         let mut added = Vec::new();
         for path in paths {
             if !self.frames.iter().any(|f| f.path == path) {
-                self.frames.push(Frame {
-                    path: path.clone(),
-                    info: None,
-                    error: None,
-                });
+                self.frames.push(Frame { path: path.clone(), info: None, error: None });
                 added.push(path);
             }
         }
@@ -101,16 +94,10 @@ pub struct Issue {
 
 impl Issue {
     fn error(message: impl Into<String>) -> Self {
-        Self {
-            severity: Severity::Error,
-            message: message.into(),
-        }
+        Self { severity: Severity::Error, message: message.into() }
     }
     fn warning(message: impl Into<String>) -> Self {
-        Self {
-            severity: Severity::Warning,
-            message: message.into(),
-        }
+        Self { severity: Severity::Warning, message: message.into() }
     }
 }
 
@@ -121,20 +108,12 @@ pub fn preflight(list: &FrameList) -> Vec<Issue> {
         issues.push(Issue::error("At least two images are needed for stacking."));
     }
     for f in list.frames.iter().filter(|f| f.error.is_some()) {
-        issues.push(Issue::error(format!(
-            "{} cannot be read: {}",
-            f.file_name(),
-            f.error.as_deref().unwrap_or("")
-        )));
+        issues.push(Issue::error(format!("{} cannot be read: {}", f.file_name(), f.error.as_deref().unwrap_or(""))));
     }
     if list.is_loading() {
         issues.push(Issue::error("Some images are still being loaded."));
     }
-    let infos: Vec<(&Frame, &FrameInfo)> = list
-        .frames
-        .iter()
-        .filter_map(|f| f.info.as_ref().map(|i| (f, i)))
-        .collect();
+    let infos: Vec<(&Frame, &FrameInfo)> = list.frames.iter().filter_map(|f| f.info.as_ref().map(|i| (f, i))).collect();
     if let Some((_, first)) = infos.first() {
         for (f, info) in &infos[1..] {
             if (info.width, info.height) != (first.width, first.height) {
@@ -179,6 +158,7 @@ mod tests {
             width: w,
             height: 100,
             preview: None,
+            color: Default::default(),
         }
     }
 
@@ -225,16 +205,10 @@ mod tests {
 
     #[test]
     fn preflight_accepts_good_stack() {
-        let l = list(&[
-            ("a", "2026-01-01 10:00:01", 10, "C"),
-            ("b", "2026-01-01 10:00:02", 10, "C"),
-        ]);
+        let l = list(&[("a", "2026-01-01 10:00:01", 10, "C"), ("b", "2026-01-01 10:00:02", 10, "C")]);
         assert!(preflight(&l).is_empty());
         // Reverse shooting order is fine too (focus from far to near).
-        let l = list(&[
-            ("a", "2026-01-01 10:00:02", 10, "C"),
-            ("b", "2026-01-01 10:00:01", 10, "C"),
-        ]);
+        let l = list(&[("a", "2026-01-01 10:00:02", 10, "C"), ("b", "2026-01-01 10:00:01", 10, "C")]);
         assert!(preflight(&l).is_empty());
     }
 

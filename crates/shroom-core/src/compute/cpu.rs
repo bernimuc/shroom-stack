@@ -10,10 +10,7 @@ use crate::raw::{CfaPattern, demosaic};
 pub(crate) struct Cpu;
 
 fn zip_mut(a: &mut Plane, b: &Plane, f: impl Fn(&mut f32, f32) + Sync) {
-    a.data_mut()
-        .par_iter_mut()
-        .zip(b.data().par_iter())
-        .for_each(|(a, b)| f(a, *b));
+    a.data_mut().par_iter_mut().zip(b.data().par_iter()).for_each(|(a, b)| f(a, *b));
 }
 
 impl Backend for Cpu {
@@ -75,6 +72,10 @@ impl Backend for Cpu {
     fn downsample_box(&self, p: &Plane, factor: usize) -> Plane {
         filter::downsample_box(p, factor)
     }
+    fn downsample_rgb(&self, p: &RgbImage, factor: usize) -> RgbImage {
+        let planes = filter::split_channels(p).map(|c| filter::downsample_box(&c, factor));
+        filter::merge_channels(&planes)
+    }
     fn sub(&self, a: &Plane, b: &Plane) -> Plane {
         let mut out = a.clone();
         zip_mut(&mut out, b, |a, b| *a -= b);
@@ -97,10 +98,7 @@ impl Backend for Cpu {
     }
     fn sum_squares(&self, planes: &[Plane; 3]) -> Plane {
         let (w, h) = (planes[0].width(), planes[0].height());
-        let data = (0..w * h)
-            .into_par_iter()
-            .map(|i| planes.iter().map(|p| p.data()[i] * p.data()[i]).sum())
-            .collect();
+        let data = (0..w * h).into_par_iter().map(|i| planes.iter().map(|p| p.data()[i] * p.data()[i]).sum()).collect();
         Plane::from_vec(w, h, data)
     }
     fn argmax_update(&self, best: &mut Plane, sum: &mut Plane, depth: &mut Plane, focus: &Plane, index: usize) {
@@ -139,15 +137,11 @@ impl Backend for Cpu {
             })
             .collect();
         let select = |dst: &mut Plane, src: &Plane| {
-            dst.data_mut()
-                .par_iter_mut()
-                .zip(src.data().par_iter())
-                .zip(take.par_iter())
-                .for_each(|((d, s), t)| {
-                    if *t {
-                        *d = *s;
-                    }
-                })
+            dst.data_mut().par_iter_mut().zip(src.data().par_iter()).zip(take.par_iter()).for_each(|((d, s), t)| {
+                if *t {
+                    *d = *s;
+                }
+            })
         };
         for (dst, src) in fused.iter_mut().zip(level) {
             select(dst, src);
@@ -161,15 +155,13 @@ impl Backend for Cpu {
         }
     }
     fn blend(&self, out: &mut RgbImage, frame: &RgbImage, depth: &Plane, index: usize) {
-        out.data_mut()
-            .par_chunks_mut(3)
-            .zip(frame.data().par_chunks(3))
-            .zip(depth.data().par_iter())
-            .for_each(|((o, f), d)| {
+        out.data_mut().par_chunks_mut(3).zip(frame.data().par_chunks(3)).zip(depth.data().par_iter()).for_each(
+            |((o, f), d)| {
                 let w = (1.0 - (d - index as f32).abs()).max(0.0);
                 if w > 0.0 {
                     o.iter_mut().zip(f).for_each(|(o, f)| *o += w * f);
                 }
-            });
+            },
+        );
     }
 }

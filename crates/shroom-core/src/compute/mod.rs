@@ -42,6 +42,7 @@ pub(crate) trait Backend: Sync {
     fn reduce(&self, p: &Self::Plane) -> Self::Plane;
     fn expand(&self, p: &Self::Plane, w: usize, h: usize) -> Self::Plane;
     fn downsample_box(&self, p: &Self::Plane, factor: usize) -> Self::Plane;
+    fn downsample_rgb(&self, p: &Self::Rgb, factor: usize) -> Self::Rgb;
 
     fn sub(&self, a: &Self::Plane, b: &Self::Plane) -> Self::Plane;
     fn add_assign(&self, a: &mut Self::Plane, b: &Self::Plane);
@@ -77,9 +78,7 @@ pub(crate) trait Backend: Sync {
 
 pub(crate) fn gaussian_kernel(sigma: f32) -> Vec<f32> {
     let r = (3.0 * sigma).ceil() as isize;
-    let mut kernel: Vec<f32> = (-r..=r)
-        .map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp())
-        .collect();
+    let mut kernel: Vec<f32> = (-r..=r).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
     let sum: f32 = kernel.iter().sum();
     kernel.iter_mut().for_each(|v| *v /= sum);
     kernel

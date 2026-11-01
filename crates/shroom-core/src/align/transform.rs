@@ -6,20 +6,14 @@ pub struct Affine {
 }
 
 impl Affine {
-    pub const IDENTITY: Affine = Affine {
-        m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-    };
+    pub const IDENTITY: Affine = Affine { m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] };
 
     pub fn translation(tx: f64, ty: f64) -> Self {
-        Affine {
-            m: [[1.0, 0.0, tx], [0.0, 1.0, ty]],
-        }
+        Affine { m: [[1.0, 0.0, tx], [0.0, 1.0, ty]] }
     }
 
     pub fn scale(s: f64) -> Self {
-        Affine {
-            m: [[s, 0.0, 0.0], [0.0, s, 0.0]],
-        }
+        Affine { m: [[s, 0.0, 0.0], [0.0, s, 0.0]] }
     }
 
     /// Similarity about `centre`: scale `s`, rotation `angle` (radians), then shift.
@@ -32,12 +26,7 @@ impl Affine {
     /// estimator.
     pub(crate) fn from_params(c: (f64, f64), a: f64, b: f64, tx: f64, ty: f64) -> Self {
         let (s, r) = (1.0 + a, b);
-        Affine {
-            m: [
-                [s, -r, c.0 - s * c.0 + r * c.1 + tx],
-                [r, s, c.1 - r * c.0 - s * c.1 + ty],
-            ],
-        }
+        Affine { m: [[s, -r, c.0 - s * c.0 + r * c.1 + tx], [r, s, c.1 - r * c.0 - s * c.1 + ty]] }
     }
 
     pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
@@ -64,12 +53,7 @@ impl Affine {
             return None;
         }
         let (a, b, c, d) = (m[1][1] / det, -m[0][1] / det, -m[1][0] / det, m[0][0] / det);
-        Some(Affine {
-            m: [
-                [a, b, -(a * m[0][2] + b * m[1][2])],
-                [c, d, -(c * m[0][2] + d * m[1][2])],
-            ],
-        })
+        Some(Affine { m: [[a, b, -(a * m[0][2] + b * m[1][2])], [c, d, -(c * m[0][2] + d * m[1][2])]] })
     }
 
     /// Mean scale factor (square root of the determinant).
@@ -78,11 +62,7 @@ impl Affine {
     }
 
     pub fn is_identity(&self, eps: f64) -> bool {
-        self.m
-            .iter()
-            .flatten()
-            .zip(Self::IDENTITY.m.iter().flatten())
-            .all(|(a, b)| (a - b).abs() < eps)
+        self.m.iter().flatten().zip(Self::IDENTITY.m.iter().flatten()).all(|(a, b)| (a - b).abs() < eps)
     }
 }
 

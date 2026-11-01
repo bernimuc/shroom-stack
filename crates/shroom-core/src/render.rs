@@ -16,10 +16,7 @@ pub struct ColorInfo {
 
 impl Default for ColorInfo {
     fn default() -> Self {
-        Self {
-            wb: [1.0; 3],
-            xyz_to_cam: None,
-        }
+        Self { wb: [1.0; 3], xyz_to_cam: None }
     }
 }
 
@@ -52,10 +49,7 @@ impl ColorInfo {
 /// Renders `image` for display, downscaling by an integer box filter so that neither side
 /// exceeds `max_size` (if given).
 pub fn render_display(image: &RgbImage, color: &ColorInfo, max_size: Option<usize>) -> DisplayImage {
-    let factor = max_size
-        .map(|m| image.width().max(image.height()).div_ceil(m.max(1)))
-        .unwrap_or(1)
-        .max(1);
+    let factor = max_size.map(|m| image.width().max(image.height()).div_ceil(m.max(1))).unwrap_or(1).max(1);
     let (w, h) = (image.width() / factor, image.height() / factor);
     let m = color.cam_to_srgb();
     // Normalise WB so the smallest multiplier is 1 and highlights clip consistently.
@@ -79,20 +73,13 @@ pub fn render_display(image: &RgbImage, color: &ColorInfo, max_size: Option<usiz
             }
         }
     });
-    DisplayImage {
-        width: w,
-        height: h,
-        data,
-    }
+    DisplayImage { width: w, height: h, data }
 }
 
 /// Renders a depth map (frame index per pixel, `0..=max_index`) in false colour: blue for
 /// the first frame through green to red for the last. Downscales like [`render_display`].
 pub fn render_depth_map(depth: &Plane, max_index: f32, max_size: Option<usize>) -> DisplayImage {
-    let factor = max_size
-        .map(|m| depth.width().max(depth.height()).div_ceil(m.max(1)))
-        .unwrap_or(1)
-        .max(1);
+    let factor = max_size.map(|m| depth.width().max(depth.height()).div_ceil(m.max(1))).unwrap_or(1).max(1);
     let (w, h) = (depth.width() / factor, depth.height() / factor);
     let mut data = vec![0u8; w * h * 3];
     data.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
@@ -101,11 +88,7 @@ pub fn render_depth_map(depth: &Plane, max_index: f32, max_size: Option<usize>) 
             row[x * 3..x * 3 + 3].copy_from_slice(&false_colour(t));
         }
     });
-    DisplayImage {
-        width: w,
-        height: h,
-        data,
-    }
+    DisplayImage { width: w, height: h, data }
 }
 
 /// Blue → cyan → green → yellow → red for `t` in `0..=1`.
@@ -123,11 +106,7 @@ fn false_colour(t: f32) -> [u8; 3] {
 /// sRGB transfer function; input is clamped to `0..=1`.
 pub fn srgb_encode(v: f32) -> f32 {
     let v = v.clamp(0.0, 1.0);
-    if v <= 0.003_130_8 {
-        12.92 * v
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
-    }
+    if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
 }
 
 const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -186,11 +165,7 @@ mod tests {
         // Typical camera matrix (Canon EOS R5, D65).
         let color = ColorInfo {
             wb: [1.0; 3],
-            xyz_to_cam: Some([
-                [0.9766, -0.3416, -0.0464],
-                [-0.4176, 1.1999, 0.2463],
-                [-0.0786, 0.1513, 0.6127],
-            ]),
+            xyz_to_cam: Some([[0.9766, -0.3416, -0.0464], [-0.4176, 1.1999, 0.2463], [-0.0786, 0.1513, 0.6127]]),
         };
         let m = color.cam_to_srgb();
         let out: Vec<f32> = (0..3).map(|c| m[c].iter().sum()).collect();
@@ -217,10 +192,7 @@ mod tests {
                 img.set_pixel(x, y, [0.1, 0.2, 0.05]);
             }
         }
-        let color = ColorInfo {
-            wb: [2.0, 1.0, 4.0],
-            xyz_to_cam: None,
-        };
+        let color = ColorInfo { wb: [2.0, 1.0, 4.0], xyz_to_cam: None };
         let d = render_display(&img, &color, Some(2));
         assert_eq!((d.width, d.height), (2, 1));
         let expected = (srgb_encode(0.2) * 255.0 + 0.5) as u8;

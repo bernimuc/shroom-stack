@@ -16,11 +16,7 @@ pub struct ViewState {
 
 impl Default for ViewState {
     fn default() -> Self {
-        Self {
-            zoom: 1.0,
-            center: Vec2::ZERO,
-            fit: true,
-        }
+        Self { zoom: 1.0, center: Vec2::ZERO, fit: true }
     }
 }
 
@@ -103,10 +99,7 @@ impl TiledImage {
                 tiles.push((rect, texture));
             }
         }
-        Self {
-            tiles,
-            size: Vec2::new(img.width as f32, img.height as f32),
-        }
+        Self { tiles, size: Vec2::new(img.width as f32, img.height as f32) }
     }
 
     /// The texture and its size, if the image fits into a single tile.
@@ -165,11 +158,7 @@ pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane]) -> Option<V
     let response = ui.allocate_rect(views_rect, Sense::click_and_drag());
     let mut hovered = None;
     if let (Some(size), Some(pos)) = (image_size, response.hover_pos()) {
-        let pane = pane_rects
-            .iter()
-            .find(|r| r.contains(pos))
-            .copied()
-            .unwrap_or(pane_rects[0]);
+        let pane = pane_rects.iter().find(|r| r.contains(pos)).copied().unwrap_or(pane_rects[0]);
         let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
         let factor = (scroll * 0.002).exp() * pinch;
         if factor != 1.0 {
@@ -215,11 +204,7 @@ pub fn show(ui: &mut egui::Ui, view: &mut ViewState, panes: &[Pane]) -> Option<V
         }
     }
     for rect in pane_rects.iter().skip(1) {
-        painter.vline(
-            rect.min.x,
-            rect.y_range(),
-            egui::Stroke::new(1.0, Color32::from_gray(90)),
-        );
+        painter.vline(rect.min.x, rect.y_range(), egui::Stroke::new(1.0, Color32::from_gray(90)));
     }
 
     // Controls below the panes.
@@ -237,16 +222,11 @@ fn controls_bar(ui: &mut egui::Ui, view: &mut ViewState, image: Option<Vec2>, pa
     };
     let fit = ViewState::fit_zoom(pane, image);
     let one = ViewState::one_to_one(ppp);
-    ui.label(format!("{:.0} %", view.percent(ppp)))
-        .on_hover_text("Current zoom level");
+    ui.label(format!("{:.0} %", view.percent(ppp))).on_hover_text("Current zoom level");
     if ui.button("Fit").on_hover_text("Fit the whole image").clicked() {
         view.fit = true;
     }
-    if ui
-        .button("1:1")
-        .on_hover_text("One image pixel per screen pixel")
-        .clicked()
-    {
+    if ui.button("1:1").on_hover_text("One image pixel per screen pixel").clicked() {
         view.zoom_to(one, Vec2::ZERO);
     }
     if ui.button("-").on_hover_text("Zoom out").clicked() {
@@ -257,14 +237,8 @@ fn controls_bar(ui: &mut egui::Ui, view: &mut ViewState, image: Option<Vec2>, pa
     }
     // Logarithmic slider from "fit" to 1:1.
     let (lo, hi) = (fit.min(one).ln(), one.max(fit).ln());
-    let mut t = if hi > lo {
-        ((view.zoom.ln() - lo) / (hi - lo)).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    let slider = ui
-        .add(egui::Slider::new(&mut t, 0.0..=1.0).show_value(false))
-        .on_hover_text("Zoom from fit to 1:1");
+    let mut t = if hi > lo { ((view.zoom.ln() - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 1.0 };
+    let slider = ui.add(egui::Slider::new(&mut t, 0.0..=1.0).show_value(false)).on_hover_text("Zoom from fit to 1:1");
     if slider.changed() {
         view.zoom_to((lo + t * (hi - lo)).exp(), Vec2::ZERO);
     }
@@ -286,11 +260,7 @@ mod tests {
     #[test]
     fn zoom_keeps_anchor_fixed() {
         let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
-        let mut v = ViewState {
-            zoom: 0.1,
-            center: Vec2::new(1000.0, 800.0),
-            fit: false,
-        };
+        let mut v = ViewState { zoom: 0.1, center: Vec2::new(1000.0, 800.0), fit: false };
         let cursor = Pos2::new(300.0, 50.0);
         let before = v.screen_to_image(pane, cursor);
         v.zoom_to(0.5, cursor - pane.center());
@@ -302,11 +272,7 @@ mod tests {
     #[test]
     fn screen_image_roundtrip_and_pan() {
         let pane = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(400.0, 300.0));
-        let mut v = ViewState {
-            zoom: 0.25,
-            center: Vec2::new(500.0, 500.0),
-            fit: false,
-        };
+        let mut v = ViewState { zoom: 0.25, center: Vec2::new(500.0, 500.0), fit: false };
         let p = Vec2::new(123.0, 456.0);
         assert!((v.screen_to_image(pane, v.image_to_screen(pane, p)) - p).length() < 1e-3);
         v.pan(Vec2::new(10.0, -5.0));
@@ -316,11 +282,7 @@ mod tests {
     #[test]
     fn update_clamps_zoom_and_centre() {
         let (pane, image) = (Vec2::new(400.0, 300.0), Vec2::new(4000.0, 3000.0));
-        let mut v = ViewState {
-            zoom: 100.0,
-            center: Vec2::new(-50.0, 9999.0),
-            fit: false,
-        };
+        let mut v = ViewState { zoom: 100.0, center: Vec2::new(-50.0, 9999.0), fit: false };
         v.update(pane, image, 2.0);
         assert_eq!(v.zoom, 0.5 * MAX_ZOOM_FACTOR);
         assert_eq!(v.center, Vec2::new(0.0, 3000.0));

@@ -6,14 +6,22 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
-use shroom_core::DisplayImage;
+use shroom_core::align::{Affine, warp_rgb};
 use shroom_core::io::{self, FrameInfo};
 use shroom_core::render::render_display;
+use shroom_core::{DisplayImage, Rect};
+
+/// A full-resolution rendering of an input frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FullRequest {
+    pub path: PathBuf,
+    /// Warp into the stack's output geometry (transform, crop), for comparing with a result.
+    pub aligned: Option<(Affine, Rect)>,
+}
 
 pub enum Loaded {
     Info(PathBuf, Result<FrameInfo, String>),
-    /// Full-resolution display rendering of a frame.
-    Full(PathBuf, Result<DisplayImage, String>),
+    Full(FullRequest, Result<DisplayImage, String>),
 }
 
 pub struct Loader {
@@ -21,20 +29,14 @@ pub struct Loader {
     rx: Receiver<Loaded>,
     ctx: egui::Context,
     /// Most recent full-preview request; older ones are skipped.
-    wanted_full: Arc<Mutex<Option<PathBuf>>>,
+    wanted_full: Arc<Mutex<Option<FullRequest>>>,
     full_worker_running: Arc<Mutex<bool>>,
 }
 
 impl Loader {
     pub fn new(ctx: egui::Context) -> Self {
         let (tx, rx) = channel();
-        Self {
-            tx,
-            rx,
-            ctx,
-            wanted_full: Arc::new(Mutex::new(None)),
-            full_worker_running: Arc::new(Mutex::new(false)),
-        }
+        Self { tx, rx, ctx, wanted_full: Arc::new(Mutex::new(None)), full_worker_running: Arc::new(Mutex::new(false)) }
     }
 
     pub fn request_info(&self, path: PathBuf) {
@@ -46,9 +48,9 @@ impl Loader {
         });
     }
 
-    /// Requests a full-resolution preview; only the latest request is served.
-    pub fn request_full(&self, path: PathBuf) {
-        *self.wanted_full.lock().unwrap() = Some(path);
+    /// Requests a full-resolution rendering; only the latest request is served.
+    pub fn request_full(&self, request: FullRequest) {
+        *self.wanted_full.lock().unwrap() = Some(request);
         let mut running = self.full_worker_running.lock().unwrap();
         if *running {
             return;
@@ -66,11 +68,17 @@ impl Loader {
                     }
                     next
                 };
-                let Some(path) = next else { break };
-                let result = io::load_linear(&path)
-                    .map(|frame| render_display(&frame.image, &frame.color, None))
+                let Some(request) = next else { break };
+                let result = io::load_linear(&request.path)
+                    .map(|frame| {
+                        let image = match &request.aligned {
+                            Some((t, crop)) => warp_rgb(&frame.image, t, *crop),
+                            None => frame.image,
+                        };
+                        render_display(&image, &frame.color, None)
+                    })
                     .map_err(|e| e.to_string());
-                let _ = tx.send(Loaded::Full(path, result));
+                let _ = tx.send(Loaded::Full(request, result));
                 ctx.request_repaint();
             }
         });

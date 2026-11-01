@@ -22,9 +22,7 @@ pub(super) fn for_result(xmp: &str, uuid: &str) -> String {
     let xmp = CROP_ATTR.replace_all(xmp, "");
     let xmp = CROP_ELEM.replace_all(&xmp, "");
     let xmp = DOCUMENT_ID.replace_all(&xmp, |c: &regex::Captures| format!("{}xmp.did:{uuid}", &c[1]));
-    INSTANCE_ID
-        .replace_all(&xmp, |c: &regex::Captures| format!("{}xmp.iid:{uuid}", &c[1]))
-        .into_owned()
+    INSTANCE_ID.replace_all(&xmp, |c: &regex::Captures| format!("{}xmp.iid:{uuid}", &c[1])).into_owned()
 }
 
 #[cfg(test)]
@@ -53,11 +51,7 @@ mod tests {
     fn removes_crop_attributes_only() {
         let out = for_result(ATTR_XMP, "new");
         assert!(!out.contains("Crop"), "{out}");
-        for kept in [
-            r#"xmp:Label="Blau""#,
-            r#"crs:Exposure2012="+0.50""#,
-            r#"crs:HasSettings="True""#,
-        ] {
+        for kept in [r#"xmp:Label="Blau""#, r#"crs:Exposure2012="+0.50""#, r#"crs:HasSettings="True""#] {
             assert!(out.contains(kept), "missing {kept}: {out}");
         }
         assert!(out.ends_with(
@@ -70,10 +64,7 @@ mod tests {
     #[test]
     fn removes_crop_elements() {
         let xmp = "<rdf:Description>\n <crs:CropTop>0.1</crs:CropTop>\n <crs:HasCrop>True</crs:HasCrop>\n <crs:Tint>+3</crs:Tint>\n</rdf:Description>";
-        assert_eq!(
-            for_result(xmp, "x"),
-            "<rdf:Description>\n <crs:Tint>+3</crs:Tint>\n</rdf:Description>"
-        );
+        assert_eq!(for_result(xmp, "x"), "<rdf:Description>\n <crs:Tint>+3</crs:Tint>\n</rdf:Description>");
     }
 
     #[test]
