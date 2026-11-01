@@ -138,8 +138,8 @@ Each milestone ends with tests green and something runnable.
 
 | # | Milestone | Content |
 |---|---|---|
-| 0 | Setup | rustup toolchain, cargo workspace, CI‑style `cargo test`/`clippy`/`fmt`, `.gitignore` |
-| 1 | DNG I/O | read metadata + embedded preview + CFA data; demosaic; write Linear DNG; round‑trip tests; open result in Lightroom |
+| 0 ✅ | Setup | rustup toolchain, cargo workspace, CI‑style `cargo test`/`clippy`/`fmt`, `.gitignore` |
+| 1 ✅ | DNG I/O | read metadata + embedded preview + CFA data; demosaic; write Linear DNG; round‑trip tests; open result in Lightroom (pending manual check) |
 | 2 | CLI stacker (CPU) | `shroom-cli` for fast iteration: both methods on CPU, compare visually with Helicon outputs |
 | 3 | Alignment | transform estimation, warp, crop; synthetic tests (known transform) |
 | 4 | GPU | wgpu compute for demosaic, warp, focus measure, pyramid; CPU vs GPU equality tests; benchmarks on Stack 1 (34 × 47 MP) |
@@ -163,3 +163,25 @@ tests, not the 4 GB examples); an opt‑in integration test suite
 | Going back | After a result exists the user can return to *Preparation* to try other settings; the app asks for confirmation before discarding the current result (incl. retouching) |
 | Brush | Size, softness, undo/redo; painting works at every zoom level |
 | Preview colours | Simple render (WB + colour matrix + gamma); need not match Lightroom |
+
+## 8. Development
+
+```bash
+cargo test                                   # unit tests
+cargo test --release -- --include-ignored    # + integration tests on examples/ (if present)
+cargo clippy --all-targets && cargo fmt
+cargo run --release -p shroom-cli -- info examples/Stack\ 3/*.dng
+cargo run --release -p shroom-cli -- convert IN.dng OUT.dng   # raw → Linear DNG
+cargo run --release -p shroom-cli -- preview IN.dng OUT.jpg   # simple display render
+```
+
+Notes from milestone 1:
+
+* **rawler is LGPL‑2.1.** Fine for a personal/open‑source app. Distributing a
+  closed‑source binary would require allowing users to relink (e.g. dynamic
+  linking) – revisit before any public release.
+* Demosaic: Malvar–He–Cutler (CPU reference, ~0.2 s for 33 MP with rayon).
+* Image orientation (EXIF rotation) is passed through to the output but not yet
+  applied in previews; all example files are unrotated.
+* rawler truncates colour matrix values to 1/10000 when writing (e.g. −0.0786 →
+  −0.0785); negligible.

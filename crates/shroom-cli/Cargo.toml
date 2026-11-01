@@ -1,0 +1,15 @@
+[package]
+name = "shroom-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "shroom"
+path = "src/main.rs"
+
+[dependencies]
+shroom-core.workspace = true
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
