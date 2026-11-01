@@ -1,0 +1,96 @@
+//! Timing breakdown of the per-frame processing steps on a real example frame.
+//! Run with `cargo test --release -p shroom-core profile -- --ignored --nocapture`.
+
+use std::path::Path;
+use std::time::Instant;
+
+use crate::align::{Affine, warp_rgb};
+use crate::filter::{box_blur, gaussian_blur, laplacian, luminance, reduce};
+use crate::image::Rect;
+use crate::io::{decode_raw, load_linear};
+use crate::raw::demosaic;
+
+fn time<T>(label: &str, f: impl FnOnce() -> T) -> T {
+    let t = Instant::now();
+    let r = f();
+    println!("{label:>28}: {:8.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+    r
+}
+
+#[test]
+#[ignore]
+fn profile_frame_steps() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Stack 1/1Z4A4075.dng");
+    if !path.exists() {
+        return;
+    }
+    time("load_linear (total)", || load_linear(&path).unwrap());
+    let raw = time("decode_raw", || decode_raw(&path).unwrap());
+    let rgb = time("demosaic", || demosaic(&raw.mosaic, raw.pattern));
+    let (w, h) = (rgb.width(), rgb.height());
+    let t = Affine::similarity((w as f64 / 2.0, h as f64 / 2.0), 0.99, 0.001, (1.3, -0.7));
+    let warped = time("warp_rgb", || warp_rgb(&rgb, &t, Rect::new(1, 1, w - 2, h - 2)));
+    let lum = time("luminance", || luminance(&warped));
+    let g = time("gaussian_blur σ1.5", || gaussian_blur(&lum, 1.5));
+    let l = time("laplacian", || laplacian(&g));
+    time("box_blur r8", || box_blur(&l, 8));
+    time("reduce (1 plane)", || reduce(&lum));
+    time("gaussian_blur σ32 (smoothing)", || gaussian_blur(&lum, 32.0));
+}
+
+#[test]
+#[ignore]
+fn profile_gpu_steps() {
+    use crate::compute::{Backend, box_blur, gaussian_blur};
+    let Some(g) = crate::gpu::gpu() else { return };
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Stack 1/1Z4A4075.dng");
+    if !path.exists() {
+        return;
+    }
+    let raw = decode_raw(&path).unwrap();
+    let sync = || g.sync();
+    for round in 0..2 {
+        println!("-- round {round}");
+        let mosaic = time("upload mosaic", || {
+            let m = g.upload_plane(&raw.mosaic);
+            sync();
+            m
+        });
+        let rgb = time("demosaic", || {
+            let r = g.demosaic(&mosaic, raw.pattern);
+            sync();
+            r
+        });
+        let (w, h) = g.rgb_size(&rgb);
+        let t = Affine::similarity((w as f64 / 2.0, h as f64 / 2.0), 0.99, 0.001, (1.3, -0.7));
+        let warped = time("warp", || {
+            let r = g.warp(&rgb, &t, Rect::new(1, 1, w - 2, h - 2));
+            sync();
+            r
+        });
+        time("focus measure", || {
+            let l = g.laplacian(&gaussian_blur(g, &g.luminance(&warped), 1.5), true);
+            let f = box_blur(g, &l, 8);
+            sync();
+            f
+        });
+        let planes = time("split", || {
+            let p = g.split(&warped);
+            sync();
+            p
+        });
+        time("reduce+expand+sub ×3", || {
+            for p in &planes {
+                let (pw, ph) = g.plane_size(p);
+                let r = g.reduce(p);
+                let _ = g.sub(p, &g.expand(&r, pw, ph));
+            }
+            sync();
+        });
+        time("energy (sumsq + box r2)", || {
+            let e = box_blur(g, &g.sum_squares(&planes), 2);
+            sync();
+            e
+        });
+    }
+}

@@ -13,6 +13,7 @@ pub use warp::warp_rgb;
 
 use estimate::AlignImage;
 
+use crate::compute::{Backend, Cpu};
 use crate::error::{Error, Result};
 use crate::image::{Rect, RgbImage};
 use crate::stack::{CancelToken, FrameSource, Progress, Stage};
@@ -31,40 +32,50 @@ pub struct Alignment {
     pub crop: Rect,
 }
 
-/// Estimates the alignment of all frames of `source`.
+/// Estimates the alignment of all frames of `source` (on the CPU).
 pub fn align_frames(source: &dyn FrameSource, progress: &dyn Fn(Progress), cancel: &CancelToken) -> Result<Alignment> {
-    let n = source.len();
-    let report = |frame| {
-        progress(Progress {
-            stage: Stage::Aligning,
-            frame,
-            total: n,
-        })
-    };
-    report(0);
-    let first = source.load(0)?;
-    let (w, h) = (first.width(), first.height());
-    let mut previous = AlignImage::new(&first, WORKING_SIZE);
-    drop(first);
+    align_with(&Cpu, source, progress, cancel)
+}
 
-    let mut transforms = vec![Affine::IDENTITY];
-    for i in 1..n {
-        cancel.check()?;
-        report(i);
-        let frame = source.load(i)?;
-        if (frame.width(), frame.height()) != (w, h) {
-            return Err(Error::InvalidInput(format!("frame {} has a different size", i + 1)));
-        }
-        let current = AlignImage::new(&frame, WORKING_SIZE);
-        let step = estimate::estimate(&previous, &current)
+/// Estimates the alignment using `backend` for preparing the frames; the estimation
+/// itself runs on small images on the CPU.
+pub(crate) fn align_with<B: Backend>(
+    backend: &B,
+    source: &dyn FrameSource,
+    progress: &dyn Fn(Progress),
+    cancel: &CancelToken,
+) -> Result<Alignment> {
+    let ctx = crate::stack::Context {
+        backend,
+        source,
+        alignment: None,
+        progress,
+        cancel,
+    };
+    let mut size = None;
+    let mut previous: Option<AlignImage> = None;
+    let mut transforms = Vec::with_capacity(source.len());
+    ctx.for_each_frame(Stage::Aligning, 0..source.len(), |i, frame| {
+        let (w, h) = *size.get_or_insert(backend.rgb_size(&frame));
+        let factor = estimate::working_factor(w, h, WORKING_SIZE);
+        let small = backend.downsample_box(&backend.luminance(&frame), factor);
+        let current = AlignImage::from_working(backend.download_plane(&small), factor);
+        let Some(prev) = &previous else {
+            transforms.push(Affine::IDENTITY);
+            previous = Some(current);
+            return Ok(());
+        };
+        let step = estimate::estimate(prev, &current)
             .map_err(|e| Error::Alignment(format!("frames {} and {}: {e}", i, i + 1)))?;
         if (step.scale_factor() - 1.0).abs() > MAX_SCALE_STEP {
             return Err(Error::Alignment(format!("frames {} and {} differ too much", i, i + 1)));
         }
         // Output → frame i−1 → frame i.
         transforms.push(step.then_after(transforms.last().unwrap()));
-        previous = current;
-    }
+        previous = Some(current);
+        Ok(())
+    })?;
+    let (w, h) = size.expect("at least one frame");
     let crop =
         common_area(&transforms, w, h).ok_or_else(|| Error::Alignment("the frames have no common area".into()))?;
     Ok(Alignment { transforms, crop })
@@ -187,8 +198,8 @@ mod tests {
         use crate::stack::{Method, StackSettings, stack};
         let (_, frames) = breathing_stack(4);
         let settings = StackSettings {
-            method: Method::DEFAULT_PYRAMID,
-            align: true,
+            use_gpu: false,
+            ..StackSettings::new(Method::DEFAULT_PYRAMID)
         };
         let result = stack(&frames, &settings, &|_| {}, &CancelToken::default()).unwrap();
         let crop = result.alignment.unwrap().crop;

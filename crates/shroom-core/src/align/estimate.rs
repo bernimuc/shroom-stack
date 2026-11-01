@@ -9,8 +9,8 @@ use rayon::prelude::*;
 use super::transform::Affine;
 use super::warp::sample_bilinear;
 use crate::error::{Error, Result};
-use crate::filter::{gaussian_blur, luminance, reduce};
-use crate::image::{Plane, RgbImage};
+use crate::filter::{gaussian_blur, reduce};
+use crate::image::Plane;
 
 /// Coarsest pyramid level keeps at least this many pixels on its shorter side.
 const MIN_LEVEL_SIZE: usize = 48;
@@ -28,9 +28,16 @@ pub(super) struct AlignImage {
 impl AlignImage {
     /// Prepares `frame` for alignment at a working resolution of at most `max_size`
     /// pixels on the longer side.
-    pub(super) fn new(frame: &RgbImage, max_size: usize) -> Self {
-        let factor = frame.width().max(frame.height()).div_ceil(max_size).max(1);
-        let base = gaussian_blur(&downsample_box(&luminance(frame), factor), 1.0);
+    #[cfg(test)]
+    pub(super) fn new(frame: &crate::image::RgbImage, max_size: usize) -> Self {
+        use crate::filter::{downsample_box, luminance};
+        let factor = working_factor(frame.width(), frame.height(), max_size);
+        Self::from_working(downsample_box(&luminance(frame), factor), factor)
+    }
+
+    /// Builds the pyramid from luminance already downscaled by `factor`.
+    pub(super) fn from_working(luminance: Plane, factor: usize) -> Self {
+        let base = gaussian_blur(&luminance, 1.0);
         let mut levels = vec![base];
         while levels.last().unwrap().width().min(levels.last().unwrap().height()) / 2 >= MIN_LEVEL_SIZE {
             let next = reduce(levels.last().unwrap());
@@ -40,26 +47,9 @@ impl AlignImage {
     }
 }
 
-/// Mean over `factor × factor` blocks (partial blocks at the border are dropped).
-fn downsample_box(src: &Plane, factor: usize) -> Plane {
-    if factor == 1 {
-        return src.clone();
-    }
-    let (w, h) = (src.width() / factor, src.height() / factor);
-    let mut out = Plane::new(w, h);
-    let norm = 1.0 / (factor * factor) as f32;
-    out.data_mut().par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for (x, o) in row.iter_mut().enumerate() {
-            let mut sum = 0.0;
-            for sy in y * factor..(y + 1) * factor {
-                sum += src.data()[sy * src.width() + x * factor..][..factor]
-                    .iter()
-                    .sum::<f32>();
-            }
-            *o = sum * norm;
-        }
-    });
-    out
+/// Downscale factor for a working resolution of at most `max_size` pixels.
+pub(super) fn working_factor(w: usize, h: usize, max_size: usize) -> usize {
+    w.max(h).div_ceil(max_size).max(1)
 }
 
 /// Estimates the transform mapping full-resolution pixel coordinates of `reference` to
@@ -203,6 +193,7 @@ fn solve4(mut h: [[f64; 4]; 4], mut g: [f64; 4]) -> Option<[f64; 4]> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::image::RgbImage;
 
     /// Smooth, non-periodic analytic test scene.
     pub(crate) fn scene(x: f64, y: f64) -> f32 {
@@ -279,11 +270,5 @@ pub(crate) mod tests {
         let g: Vec<f64> = h.iter().map(|r| r.iter().zip(&x).map(|(a, b)| a * b).sum()).collect();
         let sol = solve4(h, [g[0], g[1], g[2], g[3]]).unwrap();
         sol.iter().zip(x).for_each(|(a, b)| assert!((a - b).abs() < 1e-9));
-    }
-
-    #[test]
-    fn box_downsample_averages() {
-        let p = Plane::from_vec(4, 2, vec![0.0, 2.0, 4.0, 6.0, 2.0, 4.0, 6.0, 8.0]);
-        assert_eq!(downsample_box(&p, 2).data(), &[2.0, 6.0]);
     }
 }

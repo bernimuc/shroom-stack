@@ -118,6 +118,28 @@ pub fn expand(src: &Plane, width: usize, height: usize) -> Plane {
     out
 }
 
+/// Mean over `factor × factor` blocks (partial blocks at the border are dropped).
+pub fn downsample_box(src: &Plane, factor: usize) -> Plane {
+    if factor == 1 {
+        return src.clone();
+    }
+    let (w, h) = (src.width() / factor, src.height() / factor);
+    let mut out = Plane::new(w, h);
+    let norm = 1.0 / (factor * factor) as f32;
+    out.data_mut().par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, o) in row.iter_mut().enumerate() {
+            let mut sum = 0.0;
+            for sy in y * factor..(y + 1) * factor {
+                sum += src.data()[sy * src.width() + x * factor..][..factor]
+                    .iter()
+                    .sum::<f32>();
+            }
+            *o = sum * norm;
+        }
+    });
+    out
+}
+
 /// Splits an RGB image into three planes.
 pub fn split_channels(img: &RgbImage) -> [Plane; 3] {
     [0, 1, 2].map(|c| {
@@ -237,6 +259,12 @@ pub(crate) mod tests {
         for x in 1..10 {
             assert!((e.get(x, 0) - x as f32).abs() < 1e-5, "x={x}: {}", e.get(x, 0));
         }
+    }
+
+    #[test]
+    fn box_downsample_averages() {
+        let p = Plane::from_vec(4, 2, vec![0.0, 2.0, 4.0, 6.0, 2.0, 4.0, 6.0, 8.0]);
+        assert_eq!(downsample_box(&p, 2).data(), &[2.0, 6.0]);
     }
 
     #[test]

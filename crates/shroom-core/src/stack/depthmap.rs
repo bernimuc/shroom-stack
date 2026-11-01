@@ -13,41 +13,45 @@
 use rayon::prelude::*;
 
 use super::{Context, Stage};
+use crate::compute::{Backend, box_blur, gaussian_blur};
 use crate::error::Result;
-use crate::filter::{box_blur, expand, gaussian_blur, laplacian, luminance, reduce};
+use crate::filter::{expand, reduce};
 use crate::image::{Plane, RgbImage};
 
-pub(super) fn stack(ctx: &Context, radius: usize, smoothing: f32) -> Result<(RgbImage, Plane)> {
+pub(super) fn stack<B: Backend>(ctx: &Context<B>, radius: usize, smoothing: f32) -> Result<(RgbImage, Plane)> {
+    let b = ctx.backend;
     let n = ctx.source.len();
 
-    // Pass 1: arg-max of the focus measure.
-    let first = ctx.load(Stage::Analysing, 0, None)?;
-    let size = (first.width(), first.height());
-    let mut best = focus_measure(&first, radius);
-    let brightness = box_blur(&luminance(&first), radius);
-    drop(first);
-    let mut sum = best.clone();
-    let mut depth = Plane::new(size.0, size.1);
-    for i in 1..n {
-        let focus = focus_measure(&ctx.load(Stage::Analysing, i, Some(size))?, radius);
-        best.data_mut()
-            .par_iter_mut()
-            .zip(sum.data_mut().par_iter_mut())
-            .zip(depth.data_mut().par_iter_mut())
-            .zip(focus.data().par_iter())
-            .for_each(|(((b, s), d), f)| {
-                *s += f;
-                if *f > *b {
-                    *b = *f;
-                    *d = i as f32;
-                }
-            });
-    }
+    // Pass 1: arg-max of the focus measure (best, sum, depth), plus the first frame's
+    // brightness for noise normalisation.
+    let mut state: Option<[B::Plane; 4]> = None;
+    ctx.for_each_frame(Stage::Analysing, 0..n, |i, frame| {
+        let focus = focus_measure(b, &frame, radius);
+        match &mut state {
+            None => {
+                let (w, h) = b.rgb_size(&frame);
+                let mut sum = b.zeros_plane(w, h);
+                b.add_assign(&mut sum, &focus);
+                let brightness = box_blur(b, &b.luminance(&frame), radius);
+                state = Some([focus, sum, b.zeros_plane(w, h), brightness]);
+            }
+            Some([best, sum, depth, _]) => b.argmax_update(best, sum, depth, &focus, i),
+        }
+        Ok(())
+    })?;
+    let [best, sum, depth, brightness] = state.expect("at least two frames");
+    let size = b.plane_size(&best);
 
-    let confidence = confidence(&best, &sum, &brightness, n);
+    let confidence = confidence(
+        &b.download_plane(&best),
+        &b.download_plane(&sum),
+        &b.download_plane(&brightness),
+        n,
+    );
     drop((best, sum, brightness));
     let (sigma, self_weight) = smoothing_params(radius, smoothing);
-    let depth = smooth_depth(&depth, &confidence, sigma, self_weight, n);
+    let blur = |p: &Plane, sigma: f32| b.download_plane(&gaussian_blur(b, &b.upload_plane(p), sigma));
+    let depth = smooth_depth(&b.download_plane(&depth), &confidence, sigma, self_weight, n, &blur);
     drop(confidence);
 
     // Pass 2: blend frames by fractional depth; frames no pixel uses are skipped.
@@ -56,21 +60,13 @@ pub(super) fn stack(ctx: &Context, radius: usize, smoothing: f32) -> Result<(Rgb
         used[d.floor() as usize] = true;
         used[d.ceil() as usize] = true;
     }
-    let mut out = RgbImage::new(size.0, size.1);
-    for i in (0..n).filter(|&i| used[i]) {
-        let frame = ctx.load(Stage::Compositing, i, Some(size))?;
-        out.data_mut()
-            .par_chunks_mut(3)
-            .zip(frame.data().par_chunks(3))
-            .zip(depth.data().par_iter())
-            .for_each(|((o, f), d)| {
-                let w = (1.0 - (d - i as f32).abs()).max(0.0);
-                if w > 0.0 {
-                    o.iter_mut().zip(f).for_each(|(o, f)| *o += w * f);
-                }
-            });
-    }
-    Ok((out, depth))
+    let depth_dev = b.upload_plane(&depth);
+    let mut out = b.zeros_rgb(size.0, size.1);
+    ctx.for_each_frame(Stage::Compositing, (0..n).filter(|&i| used[i]), |i, frame| {
+        b.blend(&mut out, &frame, &depth_dev, i);
+        Ok(())
+    })?;
+    Ok((b.download_rgb(&out), depth))
 }
 
 /// Confidences below this multiple of the image's 10th percentile count as noise.
@@ -115,10 +111,9 @@ fn confidence(best: &Plane, sum: &Plane, brightness: &Plane, n: usize) -> Plane 
 const FOCUS_SIGMA: f32 = 1.5;
 
 /// Local energy of the Laplacian of Gaussian of the frame's luminance.
-fn focus_measure(frame: &RgbImage, radius: usize) -> Plane {
-    let mut lap = laplacian(&gaussian_blur(&luminance(frame), FOCUS_SIGMA));
-    lap.data_mut().par_iter_mut().for_each(|v| *v *= *v);
-    box_blur(&lap, radius)
+fn focus_measure<B: Backend>(b: &B, frame: &B::Rgb, radius: usize) -> B::Plane {
+    let lap = b.laplacian(&gaussian_blur(b, &b.luminance(frame), FOCUS_SIGMA), true);
+    box_blur(b, &lap, radius)
 }
 
 /// Maps the user parameters to the Gaussian width and the weight of a pixel's own depth
@@ -133,7 +128,14 @@ fn smoothing_params(radius: usize, smoothing: f32) -> (f32, f32) {
 /// Smooths `depth` with a Gaussian weighted by `conf`, plus the pixel's own estimate
 /// weighted by `self_weight · conf`: confident pixels (edges, texture) keep their depth,
 /// featureless areas take theirs from the surroundings. The result stays in `0..=n-1`.
-fn smooth_depth(depth: &Plane, conf: &Plane, sigma: f32, self_weight: f32, n: usize) -> Plane {
+fn smooth_depth(
+    depth: &Plane,
+    conf: &Plane,
+    sigma: f32,
+    self_weight: f32,
+    n: usize,
+    blur: &dyn Fn(&Plane, f32) -> Plane,
+) -> Plane {
     if sigma <= 0.0 {
         return depth.clone();
     }
@@ -147,7 +149,7 @@ fn smooth_depth(depth: &Plane, conf: &Plane, sigma: f32, self_weight: f32, n: us
             .map(|(d, c)| d * c)
             .collect(),
     );
-    let (mut num, mut den) = (gaussian_blur(&weighted, sigma), gaussian_blur(conf, sigma));
+    let (mut num, mut den) = (blur(&weighted, sigma), blur(conf, sigma));
     num.data_mut()
         .par_iter_mut()
         .zip(den.data_mut().par_iter_mut())
@@ -212,11 +214,19 @@ fn percentile(p: &Plane, q: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compute::Cpu;
+
+    fn cpu_blur(p: &Plane, sigma: f32) -> Plane {
+        crate::filter::gaussian_blur(p, sigma)
+    }
 
     #[test]
     fn sharper_frame_has_higher_focus() {
         let (_, frames) = crate::stack::tests::banded_stack(64, 32, 2);
-        let (f0, f1) = (focus_measure(&frames.0[0], 4), focus_measure(&frames.0[1], 4));
+        let (f0, f1) = (
+            focus_measure(&Cpu, &frames.0[0], 4),
+            focus_measure(&Cpu, &frames.0[1], 4),
+        );
         assert!(f0.get(10, 16) > 10.0 * f1.get(10, 16));
         assert!(f1.get(54, 16) > 10.0 * f0.get(54, 16));
     }
@@ -290,14 +300,14 @@ mod tests {
         // Left half confidently depth 2, right half unknown (zero focus) at depth 0.
         let depth = Plane::from_vec(40, 4, (0..160).map(|i| if i % 40 < 20 { 2.0 } else { 0.0 }).collect());
         let focus = Plane::from_vec(40, 4, (0..160).map(|i| if i % 40 < 20 { 1.0 } else { 0.0 }).collect());
-        let s = smooth_depth(&depth, &focus, 3.0, 0.0, 3);
+        let s = smooth_depth(&depth, &focus, 3.0, 0.0, 3, &cpu_blur);
         assert!((s.get(25, 2) - 2.0).abs() < 1e-3, "{}", s.get(25, 2));
         // Confident pixels keep their own depth even next to a confident different depth.
         let depth = Plane::from_vec(40, 4, (0..160).map(|i| if i % 40 < 20 { 2.0 } else { 0.0 }).collect());
         let focus = Plane::from_vec(40, 4, vec![1.0; 160]);
-        let blurred = smooth_depth(&depth, &focus, 3.0, 0.0, 3);
-        let kept = smooth_depth(&depth, &focus, 3.0, 20.0, 3);
+        let blurred = smooth_depth(&depth, &focus, 3.0, 0.0, 3, &cpu_blur);
+        let kept = smooth_depth(&depth, &focus, 3.0, 20.0, 3, &cpu_blur);
         assert!((kept.get(18, 2) - 2.0).abs() < (blurred.get(18, 2) - 2.0).abs() / 3.0);
-        assert_eq!(smooth_depth(&depth, &focus, 0.0, 0.0, 3), depth);
+        assert_eq!(smooth_depth(&depth, &focus, 0.0, 0.0, 3, &cpu_blur), depth);
     }
 }

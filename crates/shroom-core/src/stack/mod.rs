@@ -10,9 +10,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::align::{AlignedFrames, Alignment, align_frames};
+use crate::align::{Alignment, align_with};
+use crate::compute::{Backend, Cpu};
 use crate::error::{Error, Result};
 use crate::image::{Plane, RgbImage};
+use crate::raw::CfaPattern;
 
 /// Stacking method and its parameters (named after Helicon Focus' equivalents).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,11 +41,29 @@ impl Method {
     pub const DEFAULT_PYRAMID: Method = Method::Pyramid { smoothing: 4 };
 }
 
-/// Supplies the frames of a stack, in focus order, as linear RGB of identical size.
+/// A frame as delivered by a [`FrameSource`].
+pub enum SourceFrame {
+    /// Linear RGB, normalised to `0..=1`.
+    Rgb(RgbImage),
+    /// Normalised Bayer mosaic; demosaiced by the compute backend.
+    Mosaic(Plane, CfaPattern),
+}
+
+/// Supplies the frames of a stack, in focus order, all of identical size.
 /// Frames may be requested more than once.
 pub trait FrameSource: Sync {
     fn len(&self) -> usize;
     fn load(&self, index: usize) -> Result<RgbImage>;
+
+    /// The frame in its most compact form; by default [`Self::load`].
+    fn load_frame(&self, index: usize) -> Result<SourceFrame> {
+        self.load(index).map(SourceFrame::Rgb)
+    }
+
+    /// Frame size if cheaply known in advance.
+    fn frame_size(&self) -> Option<(usize, usize)> {
+        None
+    }
 
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -62,6 +82,15 @@ impl FrameSource for FileFrames {
 
     fn load(&self, index: usize) -> Result<RgbImage> {
         Ok(crate::io::load_linear(&self.paths[index])?.image)
+    }
+
+    fn load_frame(&self, index: usize) -> Result<SourceFrame> {
+        crate::io::load_for_stacking(&self.paths[index])
+    }
+
+    fn frame_size(&self) -> Option<(usize, usize)> {
+        let info = crate::io::read_frame_info(self.paths.first()?).ok()?;
+        Some((info.width, info.height))
     }
 }
 
@@ -112,6 +141,18 @@ pub struct StackSettings {
     pub method: Method,
     /// Align frames before stacking (recommended; compensates focus breathing).
     pub align: bool,
+    /// Use the GPU if one is available (falls back to the CPU otherwise).
+    pub use_gpu: bool,
+}
+
+impl StackSettings {
+    pub fn new(method: Method) -> Self {
+        Self {
+            method,
+            align: true,
+            use_gpu: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +162,8 @@ pub struct StackResult {
     pub depth_map: Plane,
     /// Frame alignment, if enabled. The image covers `alignment.crop`.
     pub alignment: Option<Alignment>,
+    /// Compute backend that was used, e.g. "CPU" or "GPU: Apple M5 (Metal)".
+    pub backend: String,
 }
 
 /// Stacks all frames of `source`.
@@ -133,63 +176,122 @@ pub fn stack(
     if source.len() < 2 {
         return Err(Error::InvalidInput("at least two frames are needed".into()));
     }
-    let alignment = if settings.align {
-        Some(align_frames(source, progress, cancel)?)
-    } else {
-        None
-    };
-    let aligned;
-    let frames: &dyn FrameSource = match &alignment {
-        Some(alignment) => {
-            aligned = AlignedFrames { source, alignment };
-            &aligned
-        }
-        None => source,
-    };
-    let ctx = Context {
-        source: frames,
-        progress,
-        cancel,
-    };
-    let (image, depth_map) = match settings.method {
-        Method::DepthMap { radius, smoothing } => depthmap::stack(&ctx, radius as usize, smoothing as f32)?,
-        Method::Pyramid { smoothing } => pyramid::stack(&ctx, smoothing as usize)?,
-    };
-    Ok(StackResult {
-        image,
-        depth_map,
-        alignment,
-    })
+    if settings.use_gpu
+        && let Some(gpu) = crate::gpu::gpu()
+        && source.frame_size().is_none_or(|(w, h)| gpu.fits(w, h))
+    {
+        return stack_with(gpu, source, settings, progress, cancel);
+    }
+    stack_with(&Cpu, source, settings, progress, cancel)
 }
 
-struct Context<'a> {
-    source: &'a dyn FrameSource,
-    progress: &'a dyn Fn(Progress),
-    cancel: &'a CancelToken,
+fn stack_with<B: Backend>(
+    backend: &B,
+    source: &dyn FrameSource,
+    settings: &StackSettings,
+    progress: &dyn Fn(Progress),
+    cancel: &CancelToken,
+) -> Result<StackResult> {
+    let run = || {
+        let alignment = if settings.align {
+            Some(align_with(backend, source, progress, cancel)?)
+        } else {
+            None
+        };
+        let ctx = Context {
+            backend,
+            source,
+            alignment: alignment.as_ref(),
+            progress,
+            cancel,
+        };
+        let (image, depth_map) = match settings.method {
+            Method::DepthMap { radius, smoothing } => depthmap::stack(&ctx, radius as usize, smoothing as f32)?,
+            Method::Pyramid { smoothing } => pyramid::stack(&ctx, smoothing as usize)?,
+        };
+        Ok(StackResult {
+            image,
+            depth_map,
+            alignment,
+            backend: backend.name(),
+        })
+    };
+    let result = run();
+    backend.trim();
+    result
 }
 
-impl Context<'_> {
-    /// Loads a frame after reporting progress and checking for cancellation; verifies the
-    /// frame size against `expected`.
-    fn load(&self, stage: Stage, index: usize, expected: Option<(usize, usize)>) -> Result<RgbImage> {
-        self.cancel.check()?;
-        (self.progress)(Progress {
-            stage,
-            frame: index,
-            total: self.source.len(),
-        });
-        let img = self.source.load(index)?;
-        if let Some((w, h)) = expected
-            && (img.width(), img.height()) != (w, h)
-        {
-            return Err(Error::InvalidInput(format!(
-                "frame {} is {}×{}, expected {w}×{h}",
-                index + 1,
-                img.width(),
-                img.height()
-            )));
-        }
-        Ok(img)
+/// Brings a source frame into backend memory as linear RGB.
+pub(crate) fn prepare<B: Backend>(backend: &B, frame: SourceFrame) -> B::Rgb {
+    match frame {
+        SourceFrame::Rgb(img) => backend.upload_rgb(&img),
+        SourceFrame::Mosaic(mosaic, pattern) => backend.demosaic(&backend.upload_plane(&mosaic), pattern),
+    }
+}
+
+/// Number of frames decoded ahead. More doesn't help: decoding already uses all cores,
+/// and with the GPU the per-frame computation is the longer part.
+const PREFETCH: usize = 1;
+
+pub(crate) struct Context<'a, B: Backend> {
+    pub backend: &'a B,
+    pub source: &'a dyn FrameSource,
+    pub alignment: Option<&'a Alignment>,
+    pub progress: &'a dyn Fn(Progress),
+    pub cancel: &'a CancelToken,
+}
+
+impl<B: Backend> Context<'_, B> {
+    /// Calls `f` with each frame of `indices` (aligned, if enabled), reporting progress
+    /// and checking for cancellation. Up to [`PREFETCH`] upcoming frames are decoded on
+    /// background threads while the current one is processed. All frames must have the
+    /// same size.
+    pub(crate) fn for_each_frame(
+        &self,
+        stage: Stage,
+        indices: impl IntoIterator<Item = usize>,
+        mut f: impl FnMut(usize, B::Rgb) -> Result<()>,
+    ) -> Result<()> {
+        let indices: Vec<usize> = indices.into_iter().collect();
+        let source = self.source;
+        std::thread::scope(|scope| {
+            let fetch = |i: usize| scope.spawn(move || source.load_frame(i));
+            let mut pending: std::collections::VecDeque<_> = indices.iter().take(PREFETCH).map(|&i| fetch(i)).collect();
+            let mut size = None;
+            for (k, &index) in indices.iter().enumerate() {
+                let frame = pending
+                    .pop_front()
+                    .expect("frame requested")
+                    .join()
+                    .expect("decoder thread panicked")?;
+                self.cancel.check()?;
+                if let Some(&i) = indices.get(k + PREFETCH) {
+                    pending.push_back(fetch(i));
+                }
+                (self.progress)(Progress {
+                    stage,
+                    frame: index,
+                    total: self.source.len(),
+                });
+                self.backend.finish();
+                let mut img = prepare(self.backend, frame);
+                if let Some(alignment) = self.alignment {
+                    img = self.backend.warp(&img, &alignment.transforms[index], alignment.crop);
+                }
+                let (w, h) = self.backend.rgb_size(&img);
+                let expected = *size.get_or_insert((w, h));
+                if (w, h) != expected {
+                    return Err(Error::InvalidInput(format!(
+                        "frame {} is {w}×{h}, expected {}×{}",
+                        index + 1,
+                        expected.0,
+                        expected.1
+                    )));
+                }
+                f(index, img)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -244,7 +346,11 @@ pub(crate) mod tests {
     }
 
     fn unaligned(method: Method) -> StackSettings {
-        StackSettings { method, align: false }
+        StackSettings {
+            method,
+            align: false,
+            use_gpu: false,
+        }
     }
 
     #[test]

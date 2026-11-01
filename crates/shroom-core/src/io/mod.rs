@@ -9,6 +9,7 @@ use std::time::SystemTime;
 
 use chrono::NaiveDateTime;
 
+pub(crate) use reader::load_for_stacking;
 pub use reader::{DngTemplate, LinearFrame, RawFrame, decode_raw, load_linear};
 pub use writer::write_linear_dng;
 

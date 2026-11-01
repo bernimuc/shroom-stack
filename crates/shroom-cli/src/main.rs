@@ -44,6 +44,9 @@ enum Command {
         /// Skip frame alignment.
         #[arg(long)]
         no_align: bool,
+        /// Compute on the CPU even if a GPU is available.
+        #[arg(long)]
+        cpu: bool,
         /// Also write a JPEG preview of the result.
         #[arg(long)]
         preview: Option<PathBuf>,
@@ -90,6 +93,7 @@ fn main() -> anyhow::Result<()> {
             radius,
             smoothing,
             no_align,
+            cpu,
             preview,
             depth_map,
         } => {
@@ -100,6 +104,7 @@ fn main() -> anyhow::Result<()> {
             let settings = StackSettings {
                 method,
                 align: !no_align,
+                use_gpu: !cpu,
             };
             stack_files(&files, &output, &settings, preview.as_deref(), depth_map.as_deref())
         }
@@ -169,7 +174,7 @@ fn stack_files(
         &progress,
         &CancelToken::default(),
     )?;
-    eprintln!("\nstacked in {:.2?}", t.elapsed());
+    eprintln!("\nstacked in {:.2?} ({})", t.elapsed(), result.backend);
     if let Some(alignment) = &result.alignment {
         let last = alignment.transforms.last().unwrap();
         eprintln!(

@@ -142,7 +142,7 @@ Each milestone ends with tests green and something runnable.
 | 1 ✅ | DNG I/O | read metadata + embedded preview + CFA data; demosaic; write Linear DNG; round‑trip tests; open result in Lightroom (pending manual check) |
 | 2 ✅ | CLI stacker (CPU) | `shroom-cli` for fast iteration: both methods on CPU, compare visually with Helicon outputs |
 | 3 ✅ | Alignment | transform estimation, warp, crop; synthetic tests (known transform) |
-| 4 | GPU | wgpu compute for demosaic, warp, focus measure, pyramid; CPU vs GPU equality tests; benchmarks on Stack 1 (34 × 47 MP) |
+| 4 ✅ | GPU | wgpu compute for demosaic, warp, focus measure, pyramid; CPU vs GPU equality tests; benchmarks on Stack 1 (34 × 47 MP) |
 | 5 | UI shell + Preparation | egui app, file list w/ thumbnails, preview widget with zoom/pan, toolbar, preflight check |
 | 6 | Processing workspace | worker thread, progress, live split view, cancel |
 | 7 | Postprocessing | result split view, save dialog, brush retouching with undo |
@@ -223,3 +223,26 @@ Depth map tuning (after milestone 3):
 * Result: detail energy 6–36 % above Helicon "B" on all four stacks; smooth surfaces and
   bokeh backgrounds are clean. Remaining weak spot: hard-edged patches where a near
   object overlaps a far background (occlusion boundaries), e.g. Stack 1 cap edges.
+
+Notes from milestone 4 (GPU):
+
+* Algorithms are written once against `compute::Backend` (CPU reference with rayon,
+  GPU with wgpu compute shaders in `gpu/shaders/*.wgsl`). Every kernel and both
+  stacking methods are tested GPU-vs-CPU; on the examples the results are identical.
+* The GPU is used automatically when available (`--cpu` forces the CPU); demosaicing,
+  warping, focus measure, pyramids and compositing run on the GPU, alignment
+  estimation and depth regularisation on the CPU (small images / one-off).
+* Lessons: wgpu only frees memory when polled (peak went to 26 GB) → wait once per
+  frame; fresh buffers are zero-filled → buffer pool; next frame is decoded on a
+  background thread. A decoded-frame cache and deeper prefetch didn't help.
+* Timing (M5, seconds, GPU vs CPU):
+
+  | Stack | frames × MP | depth map | pyramid |
+  |---|---|---|---|
+  | 1 | 34 × 47 | 9.8 vs 26.6 | 10.4 vs 22.1 |
+  | 2 | 20 × 47 | 6.6 vs 15.6 | 6.3 vs 13.1 |
+  | 3 | 20 × 33 | 4.9 vs 11.1 | 4.7 vs 9.7 |
+  | 4 | 18 × 47 | 5.7 vs 13.9 | 5.6 vs 11.5 |
+
+* Remaining GPU headroom: kernels are memory-bandwidth bound with f32 buffers; fusing
+  kernels (e.g. LoG focus measure, pyramid level) or f16 storage could gain more.

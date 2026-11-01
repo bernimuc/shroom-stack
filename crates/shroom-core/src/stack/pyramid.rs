@@ -5,71 +5,56 @@
 //! detail energy (summed over channels, window radius derived from `smoothing`) is kept;
 //! base levels are averaged. Collapsing the fused pyramid gives the output.
 
-use rayon::prelude::*;
-
 use super::{Context, Stage};
+use crate::compute::{Backend, box_blur};
 use crate::error::Result;
-use crate::filter::{box_blur, expand, merge_channels, reduce, split_channels};
 use crate::image::{Plane, RgbImage};
 
 /// Coarsest level is at least this many pixels on its shorter side.
 const MIN_BASE_SIZE: usize = 16;
 
-struct Pyramid {
+/// Fused pyramid, its per-level energies and the finest-level source map.
+type Fused<P> = (Pyramid<P>, Vec<P>, P);
+
+struct Pyramid<P> {
     /// Detail levels, finest first; three channels each.
-    levels: Vec<[Plane; 3]>,
-    base: [Plane; 3],
+    levels: Vec<[P; 3]>,
+    base: [P; 3],
 }
 
-pub(super) fn stack(ctx: &Context, smoothing: usize) -> Result<(RgbImage, Plane)> {
+pub(super) fn stack<B: Backend>(ctx: &Context<B>, smoothing: usize) -> Result<(RgbImage, Plane)> {
+    let b = ctx.backend;
     let n = ctx.source.len();
     let radius = (smoothing / 2).max(1);
 
-    let first = ctx.load(Stage::Analysing, 0, None)?;
-    let size = (first.width(), first.height());
-    let depth_count = level_count(size.0, size.1);
-    let mut fused = decompose(&first, depth_count);
-    drop(first);
-    let mut fused_energy: Vec<Plane> = fused.levels.iter().map(|l| energy(l, radius)).collect();
-    // Which frame supplied the finest-level detail, as a visualisation of the result.
-    let mut source = Plane::new(size.0, size.1);
-
-    for i in 1..n {
-        let pyr = decompose(&ctx.load(Stage::Analysing, i, Some(size))?, depth_count);
-        for (k, level) in pyr.levels.iter().enumerate() {
-            let e = energy(level, radius);
-            let take: Vec<bool> = e
-                .data()
-                .par_iter()
-                .zip(fused_energy[k].data().par_iter())
-                .map(|(a, b)| a > b)
-                .collect();
-            for (dst, src) in fused.levels[k].iter_mut().zip(level) {
-                select(dst, src, &take);
+    // Fused pyramid, its per-level energies and the finest-level source map (which
+    // frame supplied the detail, as a visualisation of the result).
+    let mut state: Option<Fused<B::Plane>> = None;
+    ctx.for_each_frame(Stage::Analysing, 0..n, |i, frame| {
+        let (w, h) = b.rgb_size(&frame);
+        let pyr = decompose(b, &frame, level_count(w, h));
+        drop(frame);
+        match &mut state {
+            None => {
+                let energies = pyr.levels.iter().map(|l| energy(b, l, radius)).collect();
+                state = Some((pyr, energies, b.zeros_plane(w, h)));
             }
-            select(&mut fused_energy[k], &e, &take);
-            if k == 0 {
-                source
-                    .data_mut()
-                    .par_iter_mut()
-                    .zip(take.par_iter())
-                    .for_each(|(s, t)| {
-                        if *t {
-                            *s = i as f32;
-                        }
-                    });
+            Some((fused, fused_energy, source)) => {
+                for (k, level) in pyr.levels.iter().enumerate() {
+                    let e = energy(b, level, radius);
+                    let map = if k == 0 { Some(&mut *source) } else { None };
+                    b.fuse(&mut fused.levels[k], &mut fused_energy[k], level, &e, map, i);
+                }
+                for (dst, src) in fused.base.iter_mut().zip(&pyr.base) {
+                    b.add_assign(dst, src);
+                }
             }
         }
-        for c in 0..3 {
-            fused.base[c]
-                .data_mut()
-                .par_iter_mut()
-                .zip(pyr.base[c].data().par_iter())
-                .for_each(|(a, b)| *a += b);
-        }
-    }
-    for c in 0..3 {
-        fused.base[c].data_mut().par_iter_mut().for_each(|v| *v /= n as f32);
+        Ok(())
+    })?;
+    let (mut fused, _, source) = state.expect("at least two frames");
+    for base in &mut fused.base {
+        b.scale(base, 1.0 / n as f32);
     }
 
     (ctx.progress)(super::Progress {
@@ -77,9 +62,9 @@ pub(super) fn stack(ctx: &Context, smoothing: usize) -> Result<(RgbImage, Plane)
         frame: n - 1,
         total: n,
     });
-    let mut image = collapse(fused);
-    image.data_mut().par_iter_mut().for_each(|v| *v = v.max(0.0));
-    Ok((image, source))
+    let mut image = collapse(b, fused);
+    b.clamp_min_rgb(&mut image, 0.0);
+    Ok((b.download_rgb(&image), b.download_plane(&source)))
 }
 
 fn level_count(w: usize, h: usize) -> usize {
@@ -92,20 +77,14 @@ fn level_count(w: usize, h: usize) -> usize {
     levels.max(1)
 }
 
-fn decompose(img: &RgbImage, levels: usize) -> Pyramid {
-    let mut current = split_channels(img);
+fn decompose<B: Backend>(b: &B, img: &B::Rgb, levels: usize) -> Pyramid<B::Plane> {
+    let mut current = b.split(img);
     let mut out = Vec::with_capacity(levels);
     for _ in 0..levels {
-        let smaller = current.each_ref().map(reduce);
+        let smaller = current.each_ref().map(|p| b.reduce(p));
         let detail = std::array::from_fn(|c| {
-            let up = expand(&smaller[c], current[c].width(), current[c].height());
-            let data = current[c]
-                .data()
-                .par_iter()
-                .zip(up.data().par_iter())
-                .map(|(a, b)| a - b)
-                .collect();
-            Plane::from_vec(current[c].width(), current[c].height(), data)
+            let (w, h) = b.plane_size(&current[c]);
+            b.sub(&current[c], &b.expand(&smaller[c], w, h))
         });
         out.push(detail);
         current = smaller;
@@ -116,45 +95,29 @@ fn decompose(img: &RgbImage, levels: usize) -> Pyramid {
     }
 }
 
-fn collapse(pyr: Pyramid) -> RgbImage {
+fn collapse<B: Backend>(b: &B, pyr: Pyramid<B::Plane>) -> B::Rgb {
     let mut current = pyr.base;
     for detail in pyr.levels.into_iter().rev() {
         current = std::array::from_fn(|c| {
-            let mut up = expand(&current[c], detail[c].width(), detail[c].height());
-            up.data_mut()
-                .par_iter_mut()
-                .zip(detail[c].data().par_iter())
-                .for_each(|(u, d)| *u += d);
+            let (w, h) = b.plane_size(&detail[c]);
+            let mut up = b.expand(&current[c], w, h);
+            b.add_assign(&mut up, &detail[c]);
             up
         });
     }
-    merge_channels(&current)
+    b.merge(&current)
 }
 
 /// Local detail energy of one level: windowed mean of the squared coefficients.
-fn energy(level: &[Plane; 3], radius: usize) -> Plane {
-    let data = (0..level[0].data().len())
-        .into_par_iter()
-        .map(|i| level.iter().map(|p| p.data()[i] * p.data()[i]).sum())
-        .collect();
-    box_blur(&Plane::from_vec(level[0].width(), level[0].height(), data), radius)
-}
-
-fn select(dst: &mut Plane, src: &Plane, take: &[bool]) {
-    dst.data_mut()
-        .par_iter_mut()
-        .zip(src.data().par_iter())
-        .zip(take.par_iter())
-        .for_each(|((d, s), t)| {
-            if *t {
-                *d = *s;
-            }
-        });
+fn energy<B: Backend>(b: &B, level: &[B::Plane; 3], radius: usize) -> B::Plane {
+    box_blur(b, &b.sum_squares(level), radius)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compute::Cpu;
+    use crate::filter::merge_channels;
     use crate::filter::tests::noise;
 
     #[test]
@@ -168,7 +131,7 @@ mod tests {
     #[test]
     fn decompose_collapse_is_lossless() {
         let img = merge_channels(&[noise(53, 37, 1), noise(53, 37, 2), noise(53, 37, 3)]);
-        let back = collapse(decompose(&img, 3));
+        let back = collapse(&Cpu, decompose(&Cpu, &img, 3));
         let err = img
             .data()
             .iter()
@@ -183,7 +146,9 @@ mod tests {
         let img = merge_channels(&[noise(40, 40, 4), noise(40, 40, 5), noise(40, 40, 6)]);
         let frames = crate::stack::tests::MemFrames(vec![img.clone(), img.clone(), img.clone()]);
         let ctx = Context {
+            backend: &Cpu,
             source: &frames,
+            alignment: None,
             progress: &|_| {},
             cancel: &Default::default(),
         };

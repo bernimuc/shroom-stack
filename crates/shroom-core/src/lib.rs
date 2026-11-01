@@ -4,13 +4,18 @@
 //! underlying raw decoder leaks into the public API.
 
 pub mod align;
+mod compute;
 mod error;
 pub mod filter;
+mod gpu;
 mod image;
 pub mod io;
 pub mod raw;
 pub mod render;
 pub mod stack;
+
+#[cfg(test)]
+mod profile;
 
 pub use error::{Error, Result};
 pub use image::{DisplayImage, Plane, Rect, RgbImage};

@@ -7,6 +7,7 @@ use rawler::imgop::xyz::Illuminant;
 use rawler::rawimage::RawPhotometricInterpretation;
 use rawler::rawsource::RawSource;
 use rawler::{RawImage, RawImageData};
+use rayon::prelude::*;
 
 use super::FrameInfo;
 use crate::error::{Error, Result};
@@ -221,6 +222,11 @@ fn decode_full(path: &Path) -> Result<(RawImage, DngTemplate)> {
 /// Decodes a Bayer DNG into a normalised mosaic.
 pub fn decode_raw(path: &Path) -> Result<RawFrame> {
     let (raw, template) = decode_full(path)?;
+    cfa_frame(path, raw, template)
+}
+
+/// Normalises decoded Bayer data into a [`RawFrame`].
+fn cfa_frame(path: &Path, raw: RawImage, template: DngTemplate) -> Result<RawFrame> {
     let RawPhotometricInterpretation::Cfa(config) = &raw.photometric else {
         return Err(Error::Unsupported {
             path: path.into(),
@@ -252,18 +258,21 @@ pub fn decode_raw(path: &Path) -> Result<RawFrame> {
         })?
         .shifted(ax, ay);
 
-    let samples = raw.data.as_f32();
     let white = raw.whitelevel.0.first().copied().unwrap_or(u16::MAX as u32) as f32;
     let black = &raw.blacklevel;
+    let sample: Box<dyn Fn(usize) -> f32 + Sync> = match &raw.data {
+        RawImageData::Integer(v) => Box::new(|i| v[i] as f32),
+        RawImageData::Float(v) => Box::new(|i| v[i]),
+    };
     let mut mosaic = Plane::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let (sx, sy) = (x + ax, y + ay);
+    mosaic.data_mut().par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let sy = y + ay;
+        for (x, out) in row.iter_mut().enumerate() {
+            let sx = x + ax;
             let b = black.levels[(sy % black.height) * black.width + sx % black.width].as_f32();
-            let v = samples[sy * raw.width + sx];
-            mosaic.set(x, y, (v - b) / (white - b));
+            *out = (sample(sy * raw.width + sx) - b) / (white - b);
         }
-    }
+    });
     let color = color_info(&raw);
     Ok(RawFrame {
         mosaic,
@@ -273,13 +282,24 @@ pub fn decode_raw(path: &Path) -> Result<RawFrame> {
     })
 }
 
+/// Loads a frame for stacking: Bayer data stays a mosaic (demosaiced by the compute
+/// backend), anything else is loaded as linear RGB.
+pub(crate) fn load_for_stacking(path: &Path) -> Result<crate::stack::SourceFrame> {
+    let (raw, template) = decode_full(path)?;
+    if matches!(raw.photometric, RawPhotometricInterpretation::Cfa(_)) {
+        let frame = cfa_frame(path, raw, template)?;
+        Ok(crate::stack::SourceFrame::Mosaic(frame.mosaic, frame.pattern))
+    } else {
+        Ok(crate::stack::SourceFrame::Rgb(load_linear(path)?.image))
+    }
+}
+
 /// Loads a DNG as linear camera RGB, demosaicing Bayer data if necessary.
 pub fn load_linear(path: &Path) -> Result<LinearFrame> {
     let (raw, template) = decode_full(path)?;
     match &raw.photometric {
         RawPhotometricInterpretation::Cfa(_) => {
-            drop(raw);
-            let frame = decode_raw(path)?;
+            let frame = cfa_frame(path, raw, template)?;
             Ok(LinearFrame {
                 image: demosaic(&frame.mosaic, frame.pattern),
                 color: frame.color,
