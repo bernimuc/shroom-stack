@@ -4,11 +4,22 @@
 //! low-resolution base). Per level and pixel the coefficient with the highest local
 //! detail energy (summed over channels, window radius derived from `smoothing`) is kept;
 //! base levels are averaged. Collapsing the fused pyramid gives the output.
+//!
+//! The fusion runs on log-encoded values. In linear values, mixing detail of different
+//! frames undershoots below black next to bright edges; clipping those channels
+//! independently crushed the shadows and tinted them (typically purple). In the log
+//! domain halos are relative to the local brightness and the result stays positive.
 
 use super::{Context, Stage};
 use crate::compute::{Backend, box_blur};
 use crate::error::Result;
 use crate::image::{Plane, RgbImage};
+
+/// Offset of the log encoding (fraction of white). Below it the encoding is close to
+/// linear, so shadow noise isn't exaggerated (a smaller offset brings colourful noise
+/// back), while undershoot next to bright edges stays relative to the brightness (a
+/// larger offset brings back crushed, tinted shadows). Tuned on the example stacks.
+const LOG_OFFSET: f32 = 1.0 / 256.0;
 
 /// Coarsest level is at least this many pixels on its shorter side.
 const MIN_BASE_SIZE: usize = 16;
@@ -30,9 +41,14 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, smoothing: usize) -> Result<(R
     // Fused pyramid, its per-level energies and the finest-level source map (which
     // frame supplied the detail, as a visualisation of the result).
     let mut state: Option<Fused<B::Plane>> = None;
-    ctx.for_each_frame(Stage::Analysing, 0..n, |i, frame| {
+    ctx.for_each_frame(Stage::Analysing, 0..n, |i, mut frame| {
         let (w, h) = b.rgb_size(&frame);
+        // Live view: the frame (before encoding) and the source map so far.
+        let map = state.as_ref().map(|(_, _, source)| source);
+        ctx.snapshot(Stage::Analysing, i, &frame, map, false);
+        b.log_rgb(&mut frame, LOG_OFFSET);
         let pyr = decompose(b, &frame, level_count(w, h));
+        drop(frame);
         match &mut state {
             None => {
                 let energies = pyr.levels.iter().map(|l| energy(b, l, radius)).collect();
@@ -49,8 +65,6 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, smoothing: usize) -> Result<(R
                 }
             }
         }
-        let map = state.as_ref().map(|(_, _, source)| source);
-        ctx.snapshot(Stage::Analysing, i, &frame, map, i + 1 == n);
         Ok(())
     })?;
     let (mut fused, _, source) = state.expect("at least two frames");
@@ -60,6 +74,7 @@ pub(super) fn stack<B: Backend>(ctx: &Context<B>, smoothing: usize) -> Result<(R
 
     (ctx.progress)(super::Progress { stage: Stage::Compositing, frame: n - 1, total: n });
     let mut image = collapse(b, fused);
+    b.exp_rgb(&mut image, LOG_OFFSET);
     b.clamp_min_rgb(&mut image, 0.0);
     Ok((b.download_rgb(&image), b.download_plane(&source)))
 }
@@ -128,6 +143,64 @@ mod tests {
         let back = collapse(&Cpu, decompose(&Cpu, &img, 3));
         let err = img.data().iter().zip(back.data()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
         assert!(err < 1e-5, "{err}");
+    }
+
+    /// Regression test: a dark, textured area next to a bright edge, sharp in different
+    /// frames. Fusing linear values undershot below black there, which crushed the
+    /// shadows and, clipped per channel, tinted them.
+    #[test]
+    fn shadows_next_to_bright_edges_are_not_crushed() {
+        use crate::filter::{gaussian_blur, split_channels};
+        let (w, h) = (128, 64);
+        let dark_texture = noise(w, h, 9);
+        let scene = |x: usize, y: usize| -> [f32; 3] {
+            if x < w / 2 {
+                [0.9, 0.85, 0.8]
+            } else {
+                let t = 0.004 + 0.004 * dark_texture.get(x, y);
+                [t * 0.7, t, t * 0.5]
+            }
+        };
+        let mut sharp = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                sharp.set_pixel(x, y, scene(x, y));
+            }
+        }
+        let blurred = merge_channels(&split_channels(&sharp).map(|p| gaussian_blur(&p, 4.0)));
+        // Frame 0: bright side sharp, dark side blurred; frame 1 the other way round.
+        let mut f0 = blurred.clone();
+        let mut f1 = blurred.clone();
+        for y in 0..h {
+            for x in 0..w {
+                if x < w / 2 { f0.set_pixel(x, y, sharp.pixel(x, y)) } else { f1.set_pixel(x, y, sharp.pixel(x, y)) }
+            }
+        }
+        let frames = crate::stack::tests::MemFrames(vec![f0, f1]);
+        let cancel = Default::default();
+        let ctx = Context::new(&Cpu, &frames, None, &|_| {}, None, &cancel);
+        let out = stack(&ctx, 4).unwrap().0;
+
+        // Dark strip next to the edge (where halos appear), away from the image border.
+        let (mut clipped, mut sum_out, mut sum_true, mut n) = (0, [0.0f32; 3], [0.0f32; 3], 0);
+        for y in 8..h - 8 {
+            for x in w / 2 + 2..w / 2 + 20 {
+                let (p, t) = (out.pixel(x, y), sharp.pixel(x, y));
+                clipped += p.iter().filter(|v| **v <= 0.0).count();
+                (0..3).for_each(|c| {
+                    sum_out[c] += p[c];
+                    sum_true[c] += t[c];
+                });
+                n += 3;
+            }
+        }
+        // Linear fusion: 11 % clipped, levels 4–7× (R and B more than G: purple).
+        // Some halo is inherent to pyramid fusion; it must stay moderate and neutral.
+        assert!(clipped * 100 < n, "{clipped} of {n} samples clipped to black");
+        let ratios = [0, 1, 2].map(|c| sum_out[c] / sum_true[c]);
+        assert!(ratios.iter().all(|r| (0.8..3.0).contains(r)), "shadow levels {ratios:?} × the true level");
+        let spread = ratios.iter().cloned().fold(f32::MIN, f32::max) / ratios.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(spread < 1.5, "colour shift in the shadows: channel levels {ratios:?}");
     }
 
     #[test]

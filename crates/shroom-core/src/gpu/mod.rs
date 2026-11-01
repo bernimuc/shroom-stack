@@ -216,6 +216,12 @@ impl Backend for Gpu {
     fn clamp_min_rgb(&self, a: &mut GpuRgb, min: f32) {
         self.unary(&a.buf, a.w * 3, a.h, 1, min);
     }
+    fn log_rgb(&self, a: &mut GpuRgb, offset: f32) {
+        self.unary(&a.buf, a.w * 3, a.h, 3, offset);
+    }
+    fn exp_rgb(&self, a: &mut GpuRgb, offset: f32) {
+        self.unary(&a.buf, a.w * 3, a.h, 4, offset);
+    }
     fn split(&self, rgb: &GpuRgb) -> [GpuPlane; 3] {
         let out = [(); 3].map(|_| self.plane(rgb.w, rgb.h));
         self.run(
@@ -354,6 +360,12 @@ mod tests {
         g.clamp_min_rgb(&mut gs, 0.0);
         Cpu.clamp_min_rgb(&mut cs, 0.0);
         assert_close(g.download_rgb(&gs).data(), cs.data(), 0.0, "clamp");
+        g.log_rgb(&mut gs, 1e-3);
+        Cpu.log_rgb(&mut cs, 1e-3);
+        assert_close(g.download_rgb(&gs).data(), cs.data(), 1e-5, "log");
+        g.exp_rgb(&mut gs, 1e-3);
+        Cpu.exp_rgb(&mut cs, 1e-3);
+        assert_close(g.download_rgb(&gs).data(), cs.data(), 1e-5, "exp");
 
         let split = g.split(&gi);
         let cpu_split = Cpu.split(&img);

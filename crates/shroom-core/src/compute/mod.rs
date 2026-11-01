@@ -48,6 +48,10 @@ pub(crate) trait Backend: Sync {
     fn add_assign(&self, a: &mut Self::Plane, b: &Self::Plane);
     fn scale(&self, a: &mut Self::Plane, f: f32);
     fn clamp_min_rgb(&self, a: &mut Self::Rgb, min: f32);
+    /// `a = ln(a + offset)` per sample.
+    fn log_rgb(&self, a: &mut Self::Rgb, offset: f32);
+    /// `a = exp(a) − offset` per sample (inverse of [`Self::log_rgb`]).
+    fn exp_rgb(&self, a: &mut Self::Rgb, offset: f32);
     fn split(&self, rgb: &Self::Rgb) -> [Self::Plane; 3];
     fn merge(&self, planes: &[Self::Plane; 3]) -> Self::Rgb;
     fn sum_squares(&self, planes: &[Self::Plane; 3]) -> Self::Plane;

@@ -62,6 +62,14 @@ enum Command {
         #[arg(long, default_value_t = 6)]
         tiles: usize,
     },
+    /// Colour statistics of the dark areas (development aid): uses the pixels that are dark
+    /// in the first file, assuming all files share its geometry.
+    Shadows {
+        files: Vec<PathBuf>,
+        /// Luminance below which a pixel counts as dark (0..1 of white).
+        #[arg(long, default_value_t = 0.01)]
+        threshold: f32,
+    },
     /// Render a DNG to a JPEG preview.
     Preview {
         input: PathBuf,
@@ -72,6 +80,9 @@ enum Command {
         /// Only render this region at 1:1, as `x,y,width,height`.
         #[arg(long, value_parser = parse_rect)]
         crop: Option<Rect>,
+        /// Exposure adjustment in stops (e.g. 3 to inspect shadows).
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        ev: f32,
     },
 }
 
@@ -80,7 +91,8 @@ fn main() -> anyhow::Result<()> {
         Command::Info { files } => info(&files),
         Command::Convert { input, output } => convert(&input, &output),
         Command::Sharpness { files, tiles } => sharpness(&files, tiles),
-        Command::Preview { input, output, size, crop } => preview(&input, &output, size, crop),
+        Command::Shadows { files, threshold } => shadows(&files, threshold),
+        Command::Preview { input, output, size, crop, ev } => preview(&input, &output, size, crop, ev),
         Command::Stack { files, output, method, radius, smoothing, no_align, cpu, preview, depth_map } => {
             let method = match method {
                 MethodArg::DepthMap => Method::DepthMap { radius, smoothing },
@@ -200,6 +212,42 @@ fn sharpness(files: &[PathBuf], tiles: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn shadows(files: &[PathBuf], threshold: f32) -> anyhow::Result<()> {
+    let mut mask: Option<Vec<bool>> = None;
+    println!(
+        "{:>10} {:>10} {:>10}   {:>9} {:>9} {:>9}   {:>7} {:>7} {:>7}  file",
+        "mean R", "mean G", "mean B", "std R", "std G", "std B", "0 R", "0 G", "0 B"
+    );
+    for path in files {
+        let img = io::load_linear(path).with_context(|| format!("loading {}", path.display()))?.image;
+        let px: Vec<[f32; 3]> = img.data().chunks(3).map(|p| [p[0], p[1], p[2]]).collect();
+        let mask =
+            mask.get_or_insert_with(|| px.iter().map(|p| (p[0] + 2.0 * p[1] + p[2]) / 4.0 < threshold).collect());
+        let n = mask.len().min(px.len());
+        let dark: Vec<[f32; 3]> = (0..n).filter(|&i| mask[i]).map(|i| px[i]).collect();
+        let count = dark.len().max(1) as f64;
+        let mean: [f64; 3] = std::array::from_fn(|c| dark.iter().map(|p| p[c] as f64).sum::<f64>() / count);
+        let std: [f64; 3] =
+            std::array::from_fn(|c| (dark.iter().map(|p| (p[c] as f64 - mean[c]).powi(2)).sum::<f64>() / count).sqrt());
+        let zeros: [f64; 3] =
+            std::array::from_fn(|c| dark.iter().filter(|p| p[c] <= 0.0).count() as f64 / count * 100.0);
+        println!(
+            "{:10.6} {:10.6} {:10.6}   {:9.6} {:9.6} {:9.6}   {:6.2}% {:6.2}% {:6.2}%  {}",
+            mean[0],
+            mean[1],
+            mean[2],
+            std[0],
+            std[1],
+            std[2],
+            zeros[0],
+            zeros[1],
+            zeros[2],
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn parse_rect(s: &str) -> Result<Rect, String> {
     let v: Vec<usize> = s
         .split(',')
@@ -211,11 +259,13 @@ fn parse_rect(s: &str) -> Result<Rect, String> {
     Ok(Rect::new(x, y, width, height))
 }
 
-fn preview(input: &Path, output: &Path, size: usize, crop: Option<Rect>) -> anyhow::Result<()> {
+fn preview(input: &Path, output: &Path, size: usize, crop: Option<Rect>, ev: f32) -> anyhow::Result<()> {
     let frame = io::load_linear(input).with_context(|| format!("loading {}", input.display()))?;
-    let (image, size) = match crop {
+    let (mut image, size) = match crop {
         Some(rect) => (frame.image.crop(rect), None),
         None => (frame.image, Some(size)),
     };
+    let gain = 2f32.powf(ev);
+    image.data_mut().iter_mut().for_each(|v| *v *= gain);
     save_jpeg(&render_display(&image, &frame.color, size), output)
 }

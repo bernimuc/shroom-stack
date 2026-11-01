@@ -90,6 +90,12 @@ impl Backend for Cpu {
     fn clamp_min_rgb(&self, a: &mut RgbImage, min: f32) {
         a.data_mut().par_iter_mut().for_each(|v| *v = v.max(min));
     }
+    fn log_rgb(&self, a: &mut RgbImage, offset: f32) {
+        a.data_mut().par_iter_mut().for_each(|v| *v = (*v + offset).ln());
+    }
+    fn exp_rgb(&self, a: &mut RgbImage, offset: f32) {
+        a.data_mut().par_iter_mut().for_each(|v| *v = v.exp() - offset);
+    }
     fn split(&self, rgb: &RgbImage) -> [Plane; 3] {
         filter::split_channels(rgb)
     }
