@@ -143,7 +143,7 @@ Each milestone ends with tests green and something runnable.
 | 2 ✅ | CLI stacker (CPU) | `shroom-cli` for fast iteration: both methods on CPU, compare visually with Helicon outputs |
 | 3 ✅ | Alignment | transform estimation, warp, crop; synthetic tests (known transform) |
 | 4 ✅ | GPU | wgpu compute for demosaic, warp, focus measure, pyramid; CPU vs GPU equality tests; benchmarks on Stack 1 (34 × 47 MP) |
-| 5 | UI shell + Preparation | egui app, file list w/ thumbnails, preview widget with zoom/pan, toolbar, preflight check |
+| 5 ✅ | UI shell + Preparation | egui app, file list w/ thumbnails, preview widget with zoom/pan, toolbar, preflight check |
 | 6 | Processing workspace | worker thread, progress, live split view, cancel |
 | 7 | Postprocessing | result split view, save dialog, brush retouching with undo |
 | 8 | Polish | performance, memory limits, error handling, app bundle/icon |
@@ -246,3 +246,18 @@ Notes from milestone 4 (GPU):
 
 * Remaining GPU headroom: kernels are memory-bandwidth bound with f32 buffers; fusing
   kernels (e.g. LoG focus measure, pyramid level) or f16 storage could gain more.
+
+Notes from milestone 5 (UI shell + Preparation):
+
+* eframe/egui 0.37 (same wgpu 30 as the core). Modules: `frames` (list model and
+  preflight checks), `loader` (background file info and full-res previews),
+  `viewer` (tiled textures, shared zoom/pan, controls), `app` (workspaces, toolbar,
+  file list).
+* Files: "Add images…" (native dialog), drag & drop, or command-line arguments; kept in
+  shooting order, reorder with Up/Down/Reverse, remove; arrow keys move the selection.
+* Preview: embedded preview immediately, full resolution loaded in the background;
+  wheel zoom at cursor, Space+drag (or middle-drag) pans, Fit/1:1/−/+/slider.
+* UI tests run headless with egui_kittest (accessibility check included);
+  `cargo test -p shroom-ui -- --ignored` writes screenshots of Stack 3 to
+  `target/ui-screenshots/`.
+* No emoji in UI text: fonts without them render boxes (and debug builds panic).

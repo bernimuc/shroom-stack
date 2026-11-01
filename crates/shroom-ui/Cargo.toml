@@ -9,4 +9,10 @@ name = "shroom-stack"
 path = "src/main.rs"
 
 [dependencies]
+chrono = "0.4"
+eframe = "0.37"
+rfd = "0.17"
 shroom-core.workspace = true
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["wgpu", "eframe", "snapshot"] }
