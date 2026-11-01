@@ -207,6 +207,19 @@ Notes from milestone 3:
 * Depth map needed a noise-robust focus measure (Laplacian of Gaussian, σ = 1.5): the
   plain Laplacian mostly measured sensor noise and always picked the un-resampled
   reference frame. Confidence = how much the best frame stands out from the mean.
-  Still visibly softer than Helicon "B" in smooth, low-texture areas → tuning task.
+  Still visibly softer than Helicon "B" in smooth, low-texture areas → tuned afterwards,
+  see below.
 * Timing on M5 CPU: 13–28 s per stack (frames are decoded 2–3×); GPU + frame cache
   are the next speed levers.
+
+Depth map tuning (after milestone 3):
+
+* `shroom sharpness` compares fine-detail energy of results (per tile, relative to the
+  first file) – used together with 1:1 crops, since artefacts also add "detail".
+* Changes: pixels keep their own depth in proportion to their confidence (edges stay
+  crisp); confidence is normalised by local brightness (shot noise), floored at 4× the
+  10th percentile, and zero in near-clipped highlights; large unconfident areas are
+  filled by push–pull interpolation instead of a fixed-size Gaussian.
+* Result: detail energy 6–36 % above Helicon "B" on all four stacks; smooth surfaces and
+  bokeh backgrounds are clean. Remaining weak spot: hard-edged patches where a near
+  object overlaps a far background (occlusion boundaries), e.g. Stack 1 cap edges.

@@ -51,6 +51,14 @@ enum Command {
         #[arg(long)]
         depth_map: Option<PathBuf>,
     },
+    /// Compare detail energy of DNGs (development aid for tuning the stackers). Prints the
+    /// mean over the whole image and, per tile, the ratio to the first file.
+    Sharpness {
+        files: Vec<PathBuf>,
+        /// Number of tiles horizontally (vertically scaled by aspect ratio).
+        #[arg(long, default_value_t = 6)]
+        tiles: usize,
+    },
     /// Render a DNG to a JPEG preview.
     Preview {
         input: PathBuf,
@@ -68,6 +76,7 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Info { files } => info(&files),
         Command::Convert { input, output } => convert(&input, &output),
+        Command::Sharpness { files, tiles } => sharpness(&files, tiles),
         Command::Preview {
             input,
             output,
@@ -196,6 +205,45 @@ fn save_jpeg(img: &DisplayImage, path: &Path) -> anyhow::Result<()> {
     image::RgbImage::from_raw(img.width as u32, img.height as u32, img.data.clone())
         .context("invalid image size")?
         .save(path)?;
+    Ok(())
+}
+
+fn sharpness(files: &[PathBuf], tiles: usize) -> anyhow::Result<()> {
+    use shroom_core::filter::{gaussian_blur, laplacian, luminance};
+    let mut grids: Vec<Vec<f64>> = Vec::new();
+    let tw = tiles;
+    for path in files {
+        let frame = io::load_linear(path).with_context(|| format!("loading {}", path.display()))?;
+        let lap = laplacian(&gaussian_blur(&luminance(&frame.image), 1.0));
+        let (w, h) = (lap.width(), lap.height());
+        let th = (tiles * h / w).max(1);
+        let mut grid = vec![0.0f64; tw * th];
+        for y in 0..h {
+            for x in 0..w {
+                let v = lap.get(x, y) as f64;
+                grid[(y * th / h) * tw + x * tw / w] += v * v;
+            }
+        }
+        let n = (w * h) as f64 / (tw * th) as f64;
+        grid.iter_mut().for_each(|g| *g /= n);
+        let mean = grid.iter().sum::<f64>() / grid.len() as f64;
+        println!("{:.4e}  {}", mean, path.display());
+        grids.push(grid);
+    }
+    for (path, grid) in files.iter().zip(&grids).skip(1) {
+        println!("\nper-tile ratio {} / {}:", path.display(), files[0].display());
+        for row in grid.chunks(tw).zip(grids[0].chunks(tw)) {
+            println!(
+                "  {}",
+                row.0
+                    .iter()
+                    .zip(row.1)
+                    .map(|(a, b)| format!("{:5.2}", a / b))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+    }
     Ok(())
 }
 
