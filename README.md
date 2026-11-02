@@ -104,6 +104,10 @@ cargo clippy --workspace --all-targets && cargo fmt
 The ignored UI tests write screenshots to `target/ui-screenshots/`. The example stacks
 in `examples/` are not part of the repository.
 
+`python3 scripts/third-party-licenses.py -o THIRD-PARTY-LICENSES.txt [--target <triple>]`
+collects the licenses of all crates linked into the binaries; CI adds this file and the
+license files to each downloadable build.
+
 | Crate | Purpose |
 |---|---|
 | `shroom-core` | DNG I/O, demosaicing, alignment, stacking (CPU and GPU), retouching |
@@ -112,6 +116,28 @@ in `examples/` are not part of the repository.
 
 Design notes and the history of each milestone are in [PLAN.md](PLAN.md).
 
-## Licence note
+## License
 
-Raw decoding uses [rawler](https://github.com/dnglab/dnglab), licensed LGPL-2.1.
+Shroom Stack is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for
+inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed
+as above, without any additional terms or conditions.
+
+### Third-party code
+
+Raw decoding uses [rawler](https://github.com/dnglab/dnglab) (part of dnglab), licensed
+under the GNU Lesser General Public License, version 2.1. It is linked into the
+application binaries; its source code is available from the dnglab repository and from
+[crates.io](https://crates.io/crates/rawler). Since Shroom Stack's own source is public, you
+can rebuild the application against a modified rawler with Cargo.
+
+The other dependencies are under permissive licenses (mostly MIT and/or Apache-2.0; also
+BSD, Zlib, ISC, Unicode, MPL-2.0 for unmodified crates, and the SIL Open Font License and
+Ubuntu Font Licence for the fonts embedded by egui).

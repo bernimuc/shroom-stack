@@ -30,23 +30,30 @@ jobs:
       # the example images (`--ignored`) only run locally.
       - run: cargo test --workspace
       - run: cargo build --release -p shroom-ui -p shroom-cli
-      # Artifacts are zipped, which loses the executable flag, so macOS and Linux
-      # binaries are packed as .tar.gz first.
+      # Each package holds the binaries, the license files and the licenses of all linked
+      # crates. Artifacts are zipped, which loses the executable flag, so macOS and Linux
+      # packages are .tar.gz files.
       - name: Package binaries
         shell: bash
         run: |
-          mkdir dist
+          mkdir dist pkg
+          # On Windows, python3 may be the Microsoft Store placeholder.
+          if [ "$RUNNER_OS" = Windows ]; then PYTHON=python; else PYTHON=python3; fi
+          "$PYTHON" scripts/third-party-licenses.py -o pkg/THIRD-PARTY-LICENSES.txt
+          cp LICENSE-MIT LICENSE-APACHE pkg/
           case "$RUNNER_OS" in
             Windows)
-              cp target/release/shroom-stack.exe target/release/shroom.exe dist/
+              cp target/release/shroom-stack.exe target/release/shroom.exe pkg/
+              cp pkg/* dist/
               ;;
             macOS)
               scripts/bundle-macos.sh
-              cp target/release/shroom target/bundle/
-              tar -czf dist/shroom-stack-macos.tar.gz -C target/bundle "Shroom Stack.app" shroom
+              cp -R "target/bundle/Shroom Stack.app" target/release/shroom pkg/
+              tar -czf dist/shroom-stack-macos.tar.gz -C pkg .
               ;;
             Linux)
-              tar -czf dist/shroom-stack-linux.tar.gz -C target/release shroom-stack shroom
+              cp target/release/shroom-stack target/release/shroom pkg/
+              tar -czf dist/shroom-stack-linux.tar.gz -C pkg .
               ;;
           esac
       - uses: actions/upload-artifact@v4
