@@ -29,4 +29,28 @@ jobs:
       # GPU tests skip themselves when no hardware GPU is available; tests that need
       # the example images (`--ignored`) only run locally.
       - run: cargo test --workspace
-      - run: cargo build --release -p shroom-ui
+      - run: cargo build --release -p shroom-ui -p shroom-cli
+      # Artifacts are zipped, which loses the executable flag, so macOS and Linux
+      # binaries are packed as .tar.gz first.
+      - name: Package binaries
+        shell: bash
+        run: |
+          mkdir dist
+          case "$RUNNER_OS" in
+            Windows)
+              cp target/release/shroom-stack.exe target/release/shroom.exe dist/
+              ;;
+            macOS)
+              scripts/bundle-macos.sh
+              cp target/release/shroom target/bundle/
+              tar -czf dist/shroom-stack-macos.tar.gz -C target/bundle "Shroom Stack.app" shroom
+              ;;
+            Linux)
+              tar -czf dist/shroom-stack-linux.tar.gz -C target/release shroom-stack shroom
+              ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shroom-stack-${{ runner.os }}
+          path: dist/
+          if-no-files-found: error
