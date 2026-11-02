@@ -159,6 +159,7 @@ pub struct ShroomApp {
     saving: Option<Receiver<Result<PathBuf, String>>>,
     dialogs: Dialogs,
     loader: Loader,
+    ctx: egui::Context,
 }
 
 impl ShroomApp {
@@ -186,6 +187,7 @@ impl ShroomApp {
             saving: None,
             dialogs: Dialogs::new(cc.egui_ctx.clone()),
             loader: Loader::new(cc.egui_ctx.clone()),
+            ctx: cc.egui_ctx.clone(),
         };
         app.add_files(files);
         app
@@ -198,6 +200,7 @@ impl ShroomApp {
         !self.frames.is_loading()
             && !self.session.is_loading()
             && !self.session.is_batch_running()
+            && !self.session.is_reading_results()
             && self.running.is_none()
             && self.saving.is_none()
             && (self.selected.is_none()
@@ -292,6 +295,8 @@ impl ShroomApp {
 
     fn set_workspace(&mut self, workspace: Workspace) {
         self.workspace = workspace;
+        // E.g. a live view in full screen when processing finishes.
+        self.view.leave_fullscreen(&self.ctx);
         self.view = ViewState::default();
         self.select(self.selected);
     }
@@ -329,11 +334,14 @@ impl ShroomApp {
                     }
                     self.full = Some((request, TiledImage::new(ctx, &name, &img.display)));
                 }
+                Loaded::Full(request, result) if self.session.wants_full(&request) => {
+                    self.session.set_full(ctx, &request, result);
+                }
                 Loaded::Full(..) => {}
             }
         }
         self.receive_job(ctx);
-        self.session.poll_batch();
+        self.session.poll_batch(&self.loader);
         match self.dialogs.poll() {
             Some(Picked::Open(paths)) if self.workspace == Workspace::Preparation => self.add_files(paths),
             Some(Picked::Save(Some(path))) => self.save_to(path),
@@ -343,11 +351,14 @@ impl ShroomApp {
         if let Some(rx) = &self.saving
             && let Ok(result) = rx.try_recv()
         {
-            self.status = Some(match result {
+            self.status = Some(match &result {
                 Ok(path) => (false, format!("Saved {}", path.display())),
                 Err(e) => (true, format!("Saving failed: {e}")),
             });
             self.saving = None;
+            if let (Ok(path), Some(done)) = (result, &self.done) {
+                self.session.add_result(path, &done.finished.paths, &self.loader);
+            }
         }
     }
 
@@ -452,8 +463,10 @@ impl ShroomApp {
 
     fn save_to(&mut self, path: PathBuf) {
         let Some(done) = &self.done else { return };
-        let (image, template) =
-            (done.retouch.image().clone(), done.finished.template.with_orientation(self.orientation));
+        let (image, template) = (
+            done.retouch.image().clone(),
+            done.finished.template.with_orientation(self.orientation).with_sources(&done.finished.paths),
+        );
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let software = concat!("Shroom Stack ", env!("CARGO_PKG_VERSION"));
@@ -497,6 +510,16 @@ impl ShroomApp {
         if right.clicked() {
             self.rotate(true);
         }
+    }
+
+    #[cfg(test)]
+    pub fn reset_view_for_test(&mut self) {
+        self.view = ViewState::default();
+    }
+
+    #[cfg(test)]
+    pub fn session_has_full_preview(&self) -> bool {
+        self.session.has_full_preview()
     }
 
     #[cfg(test)]
@@ -1168,7 +1191,7 @@ impl ShroomApp {
     fn preview(&mut self, ui: &mut egui::Ui) {
         match self.workspace {
             Workspace::Session => {
-                if let Some(Action::OpenStack(paths)) = self.session.show(ui) {
+                if let Some(Action::OpenStack(paths)) = self.session.show(ui, &self.loader) {
                     self.open_stack(paths);
                 }
             }

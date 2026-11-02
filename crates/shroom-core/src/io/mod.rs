@@ -51,6 +51,8 @@ pub struct FrameInfo {
     pub camera_values_known: bool,
     /// Bayer raw data; false for Linear DNGs such as stacking results.
     pub mosaic: bool,
+    /// For stacking results: file names of the frames they were stacked from (from XMP).
+    pub sources: Vec<String>,
     pub exposure: Exposure,
 }
 
@@ -93,6 +95,7 @@ mod tests {
             orientation: Default::default(),
             camera_values_known: true,
             mosaic: true,
+            sources: Vec::new(),
             exposure: Default::default(),
         }
     }

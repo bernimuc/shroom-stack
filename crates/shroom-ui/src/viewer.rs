@@ -12,16 +12,30 @@ pub struct ViewState {
     pub center: Vec2,
     /// Keep the whole image fitted to the pane (until the user zooms or pans).
     pub fit: bool,
+    /// The pane shown alone, filling the screen (toggled with F over a pane).
+    pub fullscreen: Option<Fullscreen>,
+    /// The pane last shown full screen.
+    last_fullscreen: Option<usize>,
+}
+
+/// A pane shown full screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fullscreen {
+    pub pane: usize,
+    /// Whether the window was put into full screen for it (and goes back afterwards).
+    restore_window: bool,
 }
 
 impl Default for ViewState {
     fn default() -> Self {
-        Self { zoom: 1.0, center: Vec2::ZERO, fit: true }
+        Self { zoom: 1.0, center: Vec2::ZERO, fit: true, fullscreen: None, last_fullscreen: None }
     }
 }
 
 /// Wheel zoom beyond 1:1 goes up to this factor (useful for retouching).
 const MAX_ZOOM_FACTOR: f32 = 4.0;
+/// Zoom factor of one step of the +/− buttons and keys.
+const ZOOM_STEP: f32 = 1.25;
 
 impl ViewState {
     pub fn fit_zoom(pane: Vec2, image: Vec2) -> f32 {
@@ -66,6 +80,16 @@ impl ViewState {
         }
     }
 
+    /// One zoom step in (`steps` > 0) or out, keeping the image point at `anchor` (offset
+    /// from the pane centre) in place. Zooming out stops at fit or 1:1, whichever is
+    /// smaller; zooming in at [`MAX_ZOOM_FACTOR`] × 1:1.
+    pub fn zoom_step(&mut self, steps: i32, pane: Vec2, image: Vec2, pixels_per_point: f32, anchor: Vec2) {
+        let one = Self::one_to_one(pixels_per_point);
+        let min = Self::fit_zoom(pane, image).min(one);
+        let zoom = (self.zoom * ZOOM_STEP.powi(steps)).clamp(min, one * MAX_ZOOM_FACTOR);
+        self.zoom_to(zoom, anchor);
+    }
+
     pub fn pan(&mut self, screen_delta: Vec2) {
         self.center -= screen_delta / self.zoom;
         self.fit = false;
@@ -81,6 +105,24 @@ impl ViewState {
 
     pub fn percent(&self, pixels_per_point: f32) -> f32 {
         self.zoom * pixels_per_point * 100.0
+    }
+
+    /// Shows `pane` alone, putting the window into full screen.
+    fn enter_fullscreen(&mut self, ctx: &egui::Context, pane: usize) {
+        let restore_window = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if restore_window {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+        }
+        self.fullscreen = Some(Fullscreen { pane, restore_window });
+    }
+
+    /// Leaves the full screen view, restoring the window.
+    pub fn leave_fullscreen(&mut self, ctx: &egui::Context) {
+        let Some(fs) = self.fullscreen.take() else { return };
+        self.last_fullscreen = Some(fs.pane);
+        if fs.restore_window {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
     }
 }
 
@@ -240,7 +282,8 @@ pub struct ViewResponse {
 /// Images are given in stored (sensor) orientation and shown rotated by `orientation`;
 /// the view state works in display coordinates. `brush` (radius in image pixels) draws a
 /// brush outline at the pointer in every pane. `options` adds display options to the
-/// controls below the panes.
+/// controls below the panes. F over a pane shows it alone, filling the screen without any
+/// other controls; F or Esc goes back.
 pub fn show(
     ui: &mut egui::Ui,
     view: &mut ViewState,
@@ -249,15 +292,93 @@ pub fn show(
     orientation: Orientation,
     options: impl FnOnce(&mut egui::Ui),
 ) -> ViewResponse {
-    let ppp = ui.ctx().pixels_per_point();
-    let stored_size = panes.iter().find_map(|p| p.image.map(|(_, s)| s));
-    let image_size = stored_size.map(|s| {
-        let (w, h) = orientation.display_size(s.x, s.y);
-        Vec2::new(w, h)
-    });
+    let ctx = ui.ctx().clone();
+    let keys = !ctx.egui_wants_keyboard_input();
+    if let Some(fs) = view.fullscreen {
+        let close = keys
+            && ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::F)
+                    | i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+            });
+        match panes.get(fs.pane) {
+            Some(pane) if !close => {
+                // Keep the workspace's layout underneath, but leave it empty.
+                ui.allocate_rect(ui.available_rect_before_wrap(), Sense::hover());
+                let screen = ctx.content_rect();
+                let area = egui::Area::new(egui::Id::unique("viewer-fullscreen"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(screen.min)
+                    .show(&ctx, |ui| {
+                        let (response, _) =
+                            panes_view(ui, view, std::slice::from_ref(pane), screen, brush, orientation, false);
+                        response
+                    });
+                return area.inner;
+            }
+            _ => view.leave_fullscreen(&ctx),
+        }
+    }
+
     let controls_height = 28.0;
     let area = ui.available_rect_before_wrap();
     let views_rect = Rect::from_min_max(area.min, Pos2::new(area.max.x, area.max.y - controls_height));
+    let (response, pointer_pane) = panes_view(ui, view, panes, views_rect, brush, orientation, true);
+    // Resizing the window into and out of full screen makes the pointer position unknown
+    // until the mouse moves; then F goes back to the pane last shown full screen.
+    let pointer_known = ctx.input(|i| i.pointer.latest_pos().is_some());
+    let pane = if pointer_known { pointer_pane } else { view.last_fullscreen.filter(|&p| p < panes.len()) };
+    if keys
+        && let Some(pane) = pane
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F))
+    {
+        view.enter_fullscreen(&ctx, pane);
+    }
+
+    // Controls below the panes.
+    let ppp = ctx.pixels_per_point();
+    let image_size = image_size(panes, orientation);
+    let pane_size = Vec2::new(views_rect.width() / panes.len().max(1) as f32, views_rect.height());
+    let controls = Rect::from_min_max(Pos2::new(area.min.x, views_rect.max.y), area.max);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
+        ui.horizontal_centered(|ui| {
+            controls_bar(ui, view, image_size, pane_size, ppp);
+            ui.separator();
+            options(ui);
+            let hint = if brush.is_some() {
+                "Wheel: zoom · Space+drag: pan · Drag: paint"
+            } else {
+                "Wheel: zoom · Drag: pan · Double-click: fit / 1:1 · F: full screen"
+            };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(hint).weak()).truncate());
+            });
+        });
+    });
+    response
+}
+
+/// Size of the panes' image in display orientation.
+fn image_size(panes: &[Pane], orientation: Orientation) -> Option<Vec2> {
+    panes.iter().find_map(|p| p.image.map(|(_, s)| s)).map(|s| {
+        let (w, h) = orientation.display_size(s.x, s.y);
+        Vec2::new(w, h)
+    })
+}
+
+/// The panes side by side in `views_rect`, with zoom, pan and brush input. Returns what
+/// happened and the index of the pane under the pointer.
+fn panes_view(
+    ui: &mut egui::Ui,
+    view: &mut ViewState,
+    panes: &[Pane],
+    views_rect: Rect,
+    brush: Option<f32>,
+    orientation: Orientation,
+    labels: bool,
+) -> (ViewResponse, Option<usize>) {
+    let ppp = ui.ctx().pixels_per_point();
+    let stored_size = panes.iter().find_map(|p| p.image.map(|(_, s)| s));
+    let image_size = image_size(panes, orientation);
     let pane_width = views_rect.width() / panes.len().max(1) as f32;
     let pane_rects: Vec<Rect> = (0..panes.len())
         .map(|i| {
@@ -273,9 +394,8 @@ pub fn show(
     }
     let response = ui.allocate_rect(views_rect, Sense::click_and_drag());
     let mut hovered = None;
-    let pointer_pane = response
-        .hover_pos()
-        .map(|pos| (pos, pane_rects.iter().find(|r| r.contains(pos)).copied().unwrap_or(pane_rects[0])));
+    let pointer_index = response.hover_pos().and_then(|pos| pane_rects.iter().position(|r| r.contains(pos)));
+    let pointer_pane = response.hover_pos().map(|pos| (pos, pane_rects[pointer_index.unwrap_or(0)]));
     // Double-click toggles fit / 1:1 (not while painting, where clicks are dabs).
     if image_size.is_some()
         && brush.is_none()
@@ -284,8 +404,7 @@ pub fn show(
     {
         view.toggle_one_to_one(ppp, pos - pane.center());
     }
-    if let (Some(size), Some(pos)) = (image_size, response.hover_pos()) {
-        let pane = pane_rects.iter().find(|r| r.contains(pos)).copied().unwrap_or(pane_rects[0]);
+    if let (Some(size), Some((pos, pane))) = (image_size, pointer_pane) {
         let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
         let factor = (scroll * 0.002).exp() * pinch;
         if factor != 1.0 {
@@ -294,6 +413,24 @@ pub fn show(
             view.zoom_to((view.zoom * factor).clamp(fit.min(max), max), pos - pane.center());
         }
         hovered = Some(view.screen_to_image(pane, pos));
+    }
+    // + and − zoom in steps, at the pointer if it is over a pane.
+    if let Some(size) = image_size
+        && !ui.ctx().egui_wants_keyboard_input()
+    {
+        let steps: i32 = ui.input_mut(|i| {
+            let zoom_in = i.consume_key(egui::Modifiers::NONE, egui::Key::Plus)
+                | i.consume_key(egui::Modifiers::NONE, egui::Key::Equals);
+            let zoom_out = i.consume_key(egui::Modifiers::NONE, egui::Key::Minus);
+            zoom_in as i32 - zoom_out as i32
+        });
+        if steps != 0 {
+            let (pane, anchor) = match pointer_pane {
+                Some((pos, pane)) => (pane, pos - pane.center()),
+                None => (pane_rects[0], Vec2::ZERO),
+            };
+            view.zoom_step(steps, pane.size(), size, ppp, anchor);
+        }
     }
     // Dragging pans, except with the brush, where Space+drag or middle-drag pans.
     let space = ui.input(|i| i.key_down(egui::Key::Space));
@@ -339,7 +476,7 @@ pub fn show(
                 );
             }
         }
-        if !pane.label.is_empty() {
+        if labels && !pane.label.is_empty() {
             let galley_pos = rect.min + Vec2::new(8.0, 8.0);
             clipped.text(
                 galley_pos,
@@ -363,29 +500,12 @@ pub fn show(
         }
     }
 
-    // Controls below the panes.
-    let controls = Rect::from_min_max(Pos2::new(area.min.x, views_rect.max.y), area.max);
-    ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
-        ui.horizontal_centered(|ui| {
-            controls_bar(ui, view, image_size, pane_rects[0].size(), ppp);
-            ui.separator();
-            options(ui);
-            let hint = if brush.is_some() {
-                "Wheel: zoom · Space+drag: pan · Drag: paint"
-            } else {
-                "Wheel: zoom · Drag: pan · Double-click: fit / 1:1"
-            };
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(egui::Label::new(egui::RichText::new(hint).weak()).truncate());
-            });
-        });
-    });
     // Report the pointer in stored-image coordinates.
     let hovered = hovered.zip(stored_size).map(|(d, s)| {
         let (x, y) = orientation.to_image((d.x, d.y), (s.x, s.y));
         Vec2::new(x, y)
     });
-    ViewResponse { hovered, painting }
+    (ViewResponse { hovered, painting }, pointer_index)
 }
 
 fn controls_bar(ui: &mut egui::Ui, view: &mut ViewState, image: Option<Vec2>, pane: Vec2, ppp: f32) {
@@ -402,11 +522,11 @@ fn controls_bar(ui: &mut egui::Ui, view: &mut ViewState, image: Option<Vec2>, pa
     if ui.button("1:1").on_hover_text("One image pixel per screen pixel").clicked() {
         view.zoom_to(one, Vec2::ZERO);
     }
-    if ui.button("-").on_hover_text("Zoom out").clicked() {
-        view.zoom_to((view.zoom / 1.25).max(fit.min(one)), Vec2::ZERO);
+    if ui.button("-").on_hover_text("Zoom out (−)").clicked() {
+        view.zoom_step(-1, pane, image, ppp, Vec2::ZERO);
     }
-    if ui.button("+").on_hover_text("Zoom in").clicked() {
-        view.zoom_to((view.zoom * 1.25).min(one * MAX_ZOOM_FACTOR), Vec2::ZERO);
+    if ui.button("+").on_hover_text("Zoom in (+)").clicked() {
+        view.zoom_step(1, pane, image, ppp, Vec2::ZERO);
     }
     // Logarithmic slider from "fit" to 1:1.
     let (lo, hi) = (fit.min(one).ln(), one.max(fit).ln());
@@ -422,6 +542,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn zoom_steps_stop_at_fit_and_max() {
+        let (pane, image, ppp) = (Vec2::new(400.0, 300.0), Vec2::new(8000.0, 6000.0), 2.0);
+        let mut v = ViewState::default();
+        v.update(pane, image, ppp);
+        assert_eq!(v.zoom, 0.05);
+        v.zoom_step(1, pane, image, ppp, Vec2::ZERO);
+        assert!((v.zoom - 0.0625).abs() < 1e-6 && !v.fit);
+        v.zoom_step(-3, pane, image, ppp, Vec2::ZERO);
+        assert_eq!(v.zoom, 0.05, "not below fit");
+        v.zoom_step(50, pane, image, ppp, Vec2::ZERO);
+        assert_eq!(v.zoom, 0.5 * MAX_ZOOM_FACTOR, "not beyond the maximum");
+    }
+
+    #[test]
     fn fit_centres_whole_image() {
         let mut v = ViewState::default();
         v.update(Vec2::new(400.0, 300.0), Vec2::new(8000.0, 4000.0), 2.0);
@@ -432,7 +566,7 @@ mod tests {
     #[test]
     fn zoom_keeps_anchor_fixed() {
         let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
-        let mut v = ViewState { zoom: 0.1, center: Vec2::new(1000.0, 800.0), fit: false };
+        let mut v = ViewState { zoom: 0.1, center: Vec2::new(1000.0, 800.0), fit: false, ..Default::default() };
         let cursor = Pos2::new(300.0, 50.0);
         let before = v.screen_to_image(pane, cursor);
         v.zoom_to(0.5, cursor - pane.center());
@@ -444,7 +578,7 @@ mod tests {
     #[test]
     fn screen_image_roundtrip_and_pan() {
         let pane = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(400.0, 300.0));
-        let mut v = ViewState { zoom: 0.25, center: Vec2::new(500.0, 500.0), fit: false };
+        let mut v = ViewState { zoom: 0.25, center: Vec2::new(500.0, 500.0), fit: false, ..Default::default() };
         let p = Vec2::new(123.0, 456.0);
         assert!((v.screen_to_image(pane, v.image_to_screen(pane, p)) - p).length() < 1e-3);
         v.pan(Vec2::new(10.0, -5.0));
@@ -466,7 +600,7 @@ mod tests {
         v.toggle_one_to_one(2.0, Vec2::ZERO);
         assert!(v.fit);
         // From another zoom level: to 1:1.
-        v = ViewState { zoom: 1.3, center: Vec2::new(10.0, 10.0), fit: false };
+        v = ViewState { zoom: 1.3, center: Vec2::new(10.0, 10.0), fit: false, ..Default::default() };
         v.toggle_one_to_one(2.0, Vec2::ZERO);
         assert_eq!(v.zoom, 0.5);
     }
@@ -474,7 +608,7 @@ mod tests {
     #[test]
     fn update_clamps_zoom_and_centre() {
         let (pane, image) = (Vec2::new(400.0, 300.0), Vec2::new(4000.0, 3000.0));
-        let mut v = ViewState { zoom: 100.0, center: Vec2::new(-50.0, 9999.0), fit: false };
+        let mut v = ViewState { zoom: 100.0, center: Vec2::new(-50.0, 9999.0), fit: false, ..Default::default() };
         v.update(pane, image, 2.0);
         assert_eq!(v.zoom, 0.5 * MAX_ZOOM_FACTOR);
         assert_eq!(v.center, Vec2::new(0.0, 3000.0));

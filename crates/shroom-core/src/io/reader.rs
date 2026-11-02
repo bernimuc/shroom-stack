@@ -71,6 +71,8 @@ pub struct DngTemplate {
     pub(super) raw_tags: Vec<(u16, Value)>,
     /// XMP packet of the source (labels, lens, develop settings), if any.
     pub(super) xmp: Option<String>,
+    /// File names of the frames a result is stacked from, recorded in its XMP.
+    pub(super) sources: Vec<String>,
 }
 
 impl std::fmt::Debug for DngTemplate {
@@ -95,6 +97,13 @@ impl DngTemplate {
     pub fn with_orientation(&self, orientation: crate::Orientation) -> Self {
         let mut t = self.clone();
         t.raw.orientation = rawler::Orientation::from_u16(orientation.to_exif());
+        t
+    }
+
+    /// The same template, recording `frames` as the sources of result files.
+    pub fn with_sources(&self, frames: &[std::path::PathBuf]) -> Self {
+        let mut t = self.clone();
+        t.sources = frames.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
         t
     }
 }
@@ -146,6 +155,12 @@ pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
         let rgb = img.to_rgb8();
         DisplayImage { width: rgb.width() as usize, height: rgb.height() as usize, data: rgb.into_raw() }
     });
+    let mosaic = matches!(raw.photometric, RawPhotometricInterpretation::Cfa(_));
+    let sources = if mosaic {
+        Vec::new()
+    } else {
+        xmp_packet(decoder.as_ref()).map(|x| super::xmp::ingredients(&x)).unwrap_or_default()
+    };
     Ok(FrameInfo {
         path: path.into(),
         file_name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -158,7 +173,8 @@ pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
         color: color_info(&raw),
         orientation: crate::Orientation::from_exif(raw.orientation.to_u16()),
         camera_values_known,
-        mosaic: matches!(raw.photometric, RawPhotometricInterpretation::Cfa(_)),
+        mosaic,
+        sources,
         exposure: exposure(&metadata),
     })
 }
@@ -195,6 +211,14 @@ fn root_entries(decoder: &dyn Decoder, filter: &dyn Fn(u16) -> bool) -> Vec<(u16
         .flatten()
         .map(|ifd| ifd.value_iter().filter(|(t, _)| filter(**t)).map(|(t, v)| (*t, v.clone())).collect())
         .unwrap_or_default()
+}
+
+/// The XMP packet stored in the root IFD, if any.
+fn xmp_packet(decoder: &dyn Decoder) -> Option<String> {
+    root_entries(decoder, &|t| t == XMP_TAG).into_iter().find_map(|(_, value)| match value {
+        Value::Byte(bytes) | Value::Undefined(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+        _ => None,
+    })
 }
 
 /// Key of a camera in the Adobe value store; matches `UniqueCameraModel` of our files.
@@ -278,15 +302,9 @@ fn decode_full(path: &Path) -> Result<(RawImage, DngTemplate)> {
         }
     }
     // rawler's DNG decoder doesn't implement `xpacket`, so read the XMP tag directly.
-    let xmp = ifd_tags(WellKnownIFD::Root, &|t| t == XMP_TAG)?
-        .into_iter()
-        .find_map(|(_, value)| match value {
-            Value::Byte(bytes) | Value::Undefined(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
-            _ => None,
-        })
-        .or_else(|| lens_xmp(&metadata));
+    let xmp = xmp_packet(decoder.as_ref()).or_else(|| lens_xmp(&metadata));
     let data = std::mem::replace(&mut raw.data, RawImageData::Integer(Vec::new()));
-    let template = DngTemplate { raw: raw.clone(), metadata, root_tags, raw_tags, xmp };
+    let template = DngTemplate { raw: raw.clone(), metadata, root_tags, raw_tags, xmp, sources: Vec::new() };
     raw.data = data;
     Ok((raw, template))
 }
@@ -440,7 +458,14 @@ pub(crate) mod tests {
             false,
         );
         raw.data = RawImageData::Integer(Vec::new());
-        DngTemplate { raw, metadata: RawMetadata::default(), root_tags: Vec::new(), raw_tags: Vec::new(), xmp: None }
+        DngTemplate {
+            raw,
+            metadata: RawMetadata::default(),
+            root_tags: Vec::new(),
+            raw_tags: Vec::new(),
+            xmp: None,
+            sources: Vec::new(),
+        }
     }
 
     #[test]

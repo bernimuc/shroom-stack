@@ -23,6 +23,22 @@ fn harness(files: Vec<PathBuf>) -> Harness<'static, ShroomApp> {
         .build_eframe(move |cc| ShroomApp::new(cc, files))
 }
 
+/// Two clicks at `point`, a frame apart.
+fn double_click_at(h: &mut Harness<'static, ShroomApp>, point: eframe::egui::Pos2) {
+    for _ in 0..2 {
+        h.drag_at(point);
+        h.step();
+        h.event(eframe::egui::Event::PointerButton {
+            pos: point,
+            button: eframe::egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        h.step();
+    }
+    h.run();
+}
+
 #[test]
 fn render_without_images_reports_error() {
     let mut h = harness(Vec::new());
@@ -32,6 +48,33 @@ fn render_without_images_reports_error() {
     h.get_by_label("Render").click();
     h.run();
     h.get_by_label_contains("At least two images");
+}
+
+#[test]
+fn fullscreen_toggles_with_f_and_escape() {
+    let mut h = harness(Vec::new());
+    h.run();
+    // Not over a pane: nothing happens.
+    h.hover_at(eframe::egui::Pos2::new(700.0, 60.0));
+    h.run();
+    h.key_press(eframe::egui::Key::F);
+    h.run();
+    assert!(h.state().view().fullscreen.is_none());
+    h.hover_at(eframe::egui::Pos2::new(700.0, 400.0));
+    h.run();
+    h.key_press(eframe::egui::Key::F);
+    h.run();
+    assert_eq!(h.state().view().fullscreen.map(|f| f.pane), Some(0));
+    h.key_press(eframe::egui::Key::Escape);
+    h.run();
+    assert!(h.state().view().fullscreen.is_none());
+    // Leaving full screen resizes the window, and the pointer position is unknown until
+    // the mouse moves: F still reopens the pane.
+    h.event(eframe::egui::Event::PointerGone);
+    h.run();
+    h.key_press(eframe::egui::Key::F);
+    h.run();
+    assert_eq!(h.state().view().fullscreen.map(|f| f.pane), Some(0));
 }
 
 #[test]
@@ -82,22 +125,31 @@ fn screenshot_with_example_stack() {
     std::fs::create_dir_all(&out).unwrap();
     h.render().unwrap().save(out.join("preparation.png")).unwrap();
 
+    // F over the image shows it full screen, without the rest of the UI.
+    h.hover_at(eframe::egui::Pos2::new(700.0, 400.0));
+    h.run();
+    h.key_press(eframe::egui::Key::F);
+    h.run();
+    assert!(h.state().view().fullscreen.is_some());
+    h.render().unwrap().save(out.join("fullscreen.png")).unwrap();
+    h.key_press(eframe::egui::Key::F);
+    h.run();
+    assert!(h.state().view().fullscreen.is_none());
+
+    // + and − zoom in and out a step.
+    let fitted = h.state().view().zoom;
+    h.key_press(eframe::egui::Key::Plus);
+    h.run();
+    assert!((h.state().view().zoom / fitted - 1.25).abs() < 1e-3, "{}", h.state().view().zoom / fitted);
+    h.key_press(eframe::egui::Key::Minus);
+    h.run();
+    assert!((h.state().view().zoom / fitted - 1.0).abs() < 1e-3);
+    h.state_mut().reset_view_for_test();
+    h.run();
+
     // Double-click switches to 1:1, keeping the clicked point under the pointer…
     let point = eframe::egui::Pos2::new(700.0, 400.0);
-    let double_click = |h: &mut Harness<'static, ShroomApp>| {
-        for _ in 0..2 {
-            h.drag_at(point);
-            h.step();
-            h.event(eframe::egui::Event::PointerButton {
-                pos: point,
-                button: eframe::egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: Default::default(),
-            });
-            h.step();
-        }
-        h.run();
-    };
+    let double_click = |h: &mut Harness<'static, ShroomApp>| double_click_at(h, point);
     h.hover_at(point);
     h.run();
     assert!(h.state().view().fit);
@@ -371,7 +423,8 @@ fn session_groups_edits_and_renders() {
     let mut sorted = sizes.clone();
     sorted.sort();
     assert_eq!(sorted, vec![6, photos4.len()]);
-    h.get_by_label_contains("stacking results not listed");
+    // The Helicon result has no recorded sources and no matching name.
+    h.get_by_label_contains("(1 other stacking result)");
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-screenshots");
     std::fs::create_dir_all(&out).unwrap();
     h.render().unwrap().save(out.join("session.png")).unwrap();
@@ -407,13 +460,45 @@ fn session_groups_edits_and_renders() {
     let result = dir.path().join(format!("{}-stacked.dng", first.file_stem().unwrap().to_string_lossy()));
     assert!(result.exists(), "{}", result.display());
     let file = SessionFile::load(dir.path()).unwrap().unwrap();
-    assert!(file.stacks.iter().any(|s| s.result.is_some()));
+    assert!(file.stacks.iter().any(|s| !s.results.is_empty()));
     assert!(dir.path().join(SESSION_FILE_NAME).exists());
+    let result_name = result.file_name().unwrap().to_string_lossy().into_owned();
+    h.get_by_label(&result_name);
 
-    // The result is not listed as a photo when the folder is reopened.
+    // Reopened, the result is shown with its stack (found by its recorded sources), not
+    // as a photo.
     h.state_mut().open_folder_for_test(dir.path().to_path_buf());
     step_until(&mut h, "reopening", |a| a.is_idle());
-    h.get_by_label_contains("2 stacking results not listed");
+    h.get_by_label_contains("(1 other stacking result)");
+    assert_eq!(h.state_mut().session().stacks()[three].results, vec![result.clone()]);
+    h.get_by_label(&result_name);
+    h.render().unwrap().save(out.join("session_results.png")).unwrap();
+
+    // The slider below the list makes the thumbnails larger.
+    let small_thumb = h.get_by_label(&result_name).rect().height();
+    h.get_by_role(eframe::egui::accesskit::Role::Slider).set_value_accesskit(160.0);
+    h.run();
+    assert_eq!(h.state_mut().session().thumb_height_for_test(), 160.0);
+    assert!(h.get_by_label(&result_name).rect().height() > 2.0 * small_thumb);
+    h.render().unwrap().save(out.join("session_large_thumbs.png")).unwrap();
+
+    // Double-clicking a result shows it on its own; Esc goes back.
+    let at = h.get_by_label(&result_name).rect().center();
+    double_click_at(&mut h, at);
+    assert_eq!(h.state_mut().session().preview_path(), Some(result.as_path()));
+    step_until(&mut h, "full preview", |a| a.session_has_full_preview());
+    h.render().unwrap().save(out.join("session_preview.png")).unwrap();
+    h.key_press(eframe::egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state_mut().session().preview_path(), None);
+    // A photo, closed with the button in the corner.
+    let photo = h.state_mut().session().stacks()[three].frames[0].clone();
+    let at = h.get_by_label(&photo.file_name().unwrap().to_string_lossy()).rect().center();
+    double_click_at(&mut h, at);
+    assert_eq!(h.state_mut().session().preview_path(), Some(photo.as_path()));
+    h.get_by_label("Back to stacks").click();
+    h.run();
+    assert_eq!(h.state_mut().session().preview_path(), None);
 
     // Opening a stack loads it into Preparation.
     h.query_all_by_label("Open").next().unwrap().click();

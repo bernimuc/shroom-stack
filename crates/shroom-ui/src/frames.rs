@@ -247,6 +247,7 @@ mod tests {
             orientation: Default::default(),
             camera_values_known: true,
             mosaic: true,
+            sources: Vec::new(),
             exposure: Default::default(),
         }
     }

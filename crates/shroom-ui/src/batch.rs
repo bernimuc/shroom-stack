@@ -40,7 +40,7 @@ impl Batch {
                 let progress = |p| send(BatchEvent::Progress(index, p));
                 let source = FileFrames { paths: paths.clone() };
                 let result = shroom_core::stack::stack(&source, &settings, &progress, &token).and_then(|result| {
-                    let template = io::read_template(&paths[0])?;
+                    let template = io::read_template(&paths[0])?.with_sources(&paths);
                     let path = result_path(&paths[0]);
                     let software = concat!("Shroom Stack ", env!("CARGO_PKG_VERSION"));
                     io::write_linear_dng(&path, &result.image, &template, software)?;

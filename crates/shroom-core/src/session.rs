@@ -240,8 +240,11 @@ pub struct StackEntry {
     /// Photos left out when stacking.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded: Vec<String>,
-    /// The saved stacking result, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Stacking results made from this stack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<String>,
+    /// A single result, as written by earlier versions; read only.
+    #[serde(default, skip_serializing)]
     pub result: Option<String>,
 }
 
@@ -278,7 +281,8 @@ impl SessionFile {
 pub struct Stack {
     pub frames: Vec<PathBuf>,
     pub excluded: HashSet<PathBuf>,
-    pub result: Option<PathBuf>,
+    /// Stacking results made from this stack, by file name.
+    pub results: Vec<PathBuf>,
     /// Probability that this stack really starts here (1 for the first stack and for
     /// stacks restored from a session file, where the grouping was already reviewed).
     pub boundary: f32,
@@ -317,6 +321,8 @@ pub fn merge_with_previous(stacks: &mut Vec<Stack>, stack: usize) {
     let prev = &mut stacks[stack - 1];
     prev.frames.extend(s.frames);
     prev.excluded.extend(s.excluded);
+    prev.results.extend(s.results);
+    prev.results.sort();
 }
 
 /// Moves frames `0..=frame` of stack `stack` to the end of the previous stack.
@@ -362,8 +368,8 @@ pub fn assemble(folder: &Path, shots: &[Shot], file: Option<&SessionFile>) -> Ve
         let Some(&first) = frames.first() else { continue };
         let paths: Vec<PathBuf> = frames.iter().map(|&i| shots[i].path.clone()).collect();
         let excluded = entry.excluded.iter().map(|n| folder.join(n)).filter(|p| paths.contains(p)).collect();
-        let result = entry.result.as_ref().map(|n| folder.join(n));
-        stacks.push((first, Stack { frames: paths, excluded, result, boundary: 1.0, reasons: Vec::new() }));
+        let results = entry.results.iter().chain(&entry.result).map(|n| folder.join(n)).collect();
+        stacks.push((first, Stack { frames: paths, excluded, results, boundary: 1.0, reasons: Vec::new() }));
     }
 
     let new: Vec<usize> = (0..shots.len()).filter(|&i| !known[i]).collect();
@@ -380,10 +386,61 @@ pub fn assemble(folder: &Path, shots: &[Shot], file: Option<&SessionFile>) -> Ve
             None => (1.0, Vec::new()),
         };
         let frames = new[start..end].iter().map(|&i| shots[i].path.clone()).collect();
-        stacks.push((new[start], Stack { frames, excluded: HashSet::new(), result: None, boundary, reasons }));
+        stacks.push((new[start], Stack { frames, excluded: HashSet::new(), results: Vec::new(), boundary, reasons }));
     }
     stacks.sort_by_key(|(first, _)| *first);
     stacks.into_iter().map(|(_, s)| s).collect()
+}
+
+/// A stacking result (Linear DNG) found in a session folder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResultFile {
+    pub path: PathBuf,
+    /// File names of the frames it was stacked from, as recorded in the file.
+    pub sources: Vec<String>,
+}
+
+/// Assigns the `results` of a folder to the stacks they were made from, replacing what the
+/// stacks listed, and returns the results that fit no stack. A result goes to
+/// 1. the stack with most of its recorded source frames,
+/// 2. else the stack the session file listed it for (results of earlier versions),
+/// 3. else the stack containing `<name>` for a result named `<name>-stacked[-n].dng`.
+pub fn attach_results(stacks: &mut [Stack], results: &[ResultFile]) -> Vec<PathBuf> {
+    let listed: HashMap<PathBuf, usize> = stacks
+        .iter_mut()
+        .enumerate()
+        .flat_map(|(i, s)| std::mem::take(&mut s.results).into_iter().map(move |p| (p, i)))
+        .collect();
+    let stem = |p: &Path| p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let file_name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut unmatched = Vec::new();
+    for result in results {
+        let by_sources = stacks
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i, s.frames.iter().filter(|p| result.sources.contains(&file_name(p))).count()))
+            .filter(|&(_, n)| n > 0)
+            .max_by_key(|&(i, n)| (n, std::cmp::Reverse(i)))
+            .map(|(i, _)| i);
+        let by_name = || {
+            let name = stem(&result.path);
+            let base = stacked_base(&name)?;
+            stacks.iter().position(|s| s.frames.iter().any(|p| stem(p) == base))
+        };
+        match by_sources.or_else(|| listed.get(&result.path).copied()).or_else(by_name) {
+            Some(i) => stacks[i].results.push(result.path.clone()),
+            None => unmatched.push(result.path.clone()),
+        }
+    }
+    stacks.iter_mut().for_each(|s| s.results.sort());
+    unmatched
+}
+
+/// `IMG_1` for result names `IMG_1-stacked` and `IMG_1-stacked-2`.
+fn stacked_base(stem: &str) -> Option<&str> {
+    let (base, rest) = stem.rsplit_once("-stacked")?;
+    (rest.is_empty() || rest.strip_prefix('-').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
+        .then_some(base)
 }
 
 /// The session file for `stacks` of `folder`.
@@ -396,7 +453,8 @@ pub fn to_file(folder: &Path, stacks: &[Stack]) -> SessionFile {
             .map(|s| StackEntry {
                 frames: s.frames.iter().map(|p| name(p)).collect(),
                 excluded: s.frames.iter().filter(|p| s.excluded.contains(*p)).map(|p| name(p)).collect(),
-                result: s.result.as_deref().map(name),
+                results: s.results.iter().map(|p| name(p)).collect(),
+                result: None,
             })
             .collect(),
     }
@@ -483,7 +541,7 @@ mod tests {
         let img = |seed: u8| DisplayImage {
             width: 64,
             height: 48,
-            data: (0..64 * 48 * 3).map(|i| ((i as u32 * 2654435761u32) >> (seed % 8)) as u8).collect(),
+            data: (0..64 * 48 * 3).map(|i| ((i as u32).wrapping_mul(2654435761) >> (seed % 8)) as u8).collect(),
         };
         let (a, b) = (Signature::new(&img(1)).unwrap(), Signature::new(&img(5)).unwrap());
         assert!((a.similarity(&a) - 1.0).abs() < 1e-4);
@@ -529,7 +587,8 @@ mod tests {
                 StackEntry {
                     frames: vec!["003.dng".into(), "004.dng".into(), "005.dng".into(), "gone.dng".into()],
                     excluded: vec!["004.dng".into()],
-                    result: Some("003-stacked.dng".into()),
+                    results: vec!["003-stacked.dng".into()],
+                    ..Default::default()
                 },
                 StackEntry { frames: (6..12).map(|i| format!("{i:03}.dng")).collect(), ..Default::default() },
             ],
@@ -538,12 +597,64 @@ mod tests {
         let sizes: Vec<usize> = stacks.iter().map(|s| s.frames.len()).collect();
         assert_eq!(sizes, vec![3, 3, 6, 4]);
         assert_eq!(stacks[1].included().len(), 2);
-        assert_eq!(stacks[1].result.as_deref(), Some(Path::new("/photos/003-stacked.dng")));
+        assert_eq!(stacks[1].results, vec![PathBuf::from("/photos/003-stacked.dng")]);
         assert_eq!(stacks[3].boundary, 1.0);
 
         let mut back = to_file(folder, &stacks);
         back.stacks[1].frames.push("gone.dng".into());
         assert_eq!(back.stacks[..3], file.stacks[..]);
+    }
+
+    #[test]
+    fn legacy_single_result_is_read() {
+        let file: SessionFile = serde_json::from_str(
+            r#"{"version":1,"stacks":[{"frames":["000.dng","001.dng"],"result":"000-stacked.dng"}]}"#,
+        )
+        .unwrap();
+        let stacks = assemble(Path::new("/photos"), &shots(&[0.0, 0.1]), Some(&file));
+        assert_eq!(stacks[0].results, vec![PathBuf::from("/photos/000-stacked.dng")]);
+        let back = serde_json::to_string(&to_file(Path::new("/photos"), &stacks)).unwrap();
+        assert!(back.contains(r#""results":["000-stacked.dng"]"#) && !back.contains(r#""result""#), "{back}");
+    }
+
+    #[test]
+    fn results_attach_by_sources_then_listing_then_name() {
+        let p = |n: &str| PathBuf::from(format!("/photos/{n}"));
+        let frames = |r: std::ops::Range<usize>| r.map(|i| p(&format!("{i:03}.dng"))).collect::<Vec<_>>();
+        let mut stacks: Vec<Stack> = [frames(0..3), frames(3..6), frames(6..8)]
+            .into_iter()
+            .map(|frames| Stack { frames, ..reviewed() })
+            .collect();
+        let result = |n: &str, sources: &[&str]| ResultFile {
+            path: p(n),
+            sources: sources.iter().map(|s| s.to_string()).collect(),
+        };
+        // Listed for stack 0 by the session file, but its sources say stack 1.
+        stacks[0].results = vec![p("moved.dng"), p("listed.dng")];
+        let unmatched = attach_results(
+            &mut stacks,
+            &[
+                result("moved.dng", &["002.dng", "003.dng", "004.dng"]),
+                result("listed.dng", &[]),
+                result("006-stacked-2.dng", &[]),
+                result("000-stacked.dng", &[]),
+                result("other.dng", &[]),
+                result("foreign-stacked.dng", &["x.dng"]),
+            ],
+        );
+        assert_eq!(stacks[0].results, vec![p("000-stacked.dng"), p("listed.dng")]);
+        assert_eq!(stacks[1].results, vec![p("moved.dng")]);
+        assert_eq!(stacks[2].results, vec![p("006-stacked-2.dng")]);
+        assert_eq!(unmatched, vec![p("other.dng"), p("foreign-stacked.dng")]);
+    }
+
+    #[test]
+    fn stacked_base_names() {
+        assert_eq!(stacked_base("IMG_1-stacked"), Some("IMG_1"));
+        assert_eq!(stacked_base("IMG_1-stacked-12"), Some("IMG_1"));
+        assert_eq!(stacked_base("IMG_1-stacked-"), None);
+        assert_eq!(stacked_base("IMG_1-stacked-x"), None);
+        assert_eq!(stacked_base("IMG_1"), None);
     }
 
     fn layout(stacks: &[Stack]) -> Vec<Vec<String>> {

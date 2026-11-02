@@ -79,9 +79,10 @@ fn write_to(path: &Path, image: &RgbImage, template: &DngTemplate, software: &st
     dng.root_ifd_mut().add_tag(ExifTag::Orientation, raw.orientation.to_u16());
     // The source's own colour tags take precedence: rawler rounds matrices when writing.
     dng.root_ifd_mut().copy_with_override(template.root_tags.iter().map(|(t, v)| (t, v)));
-    if let Some(xmp) = &template.xmp {
-        let uuid = uuid::Uuid::new_v4().to_string();
-        dng.xpacket(super::xmp::for_result(xmp, &uuid)).map_err(enc_err)?;
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let xmp = template.xmp.as_deref().map(|x| super::xmp::for_result(x, &uuid));
+    if let Some(xmp) = super::xmp::with_ingredients(xmp.as_deref(), &template.sources) {
+        dng.xpacket(xmp).map_err(enc_err)?;
     }
     dng.root_ifd_mut().add_tag(TiffCommonTag::Software, software);
     dng.root_ifd_mut().add_tag(ExifTag::ModifyDate, chrono::Local::now().format("%Y:%m:%d %H:%M:%S").to_string());
@@ -125,6 +126,18 @@ mod tests {
         let (gm, wm) = (got.xyz_to_cam.unwrap(), want.xyz_to_cam.unwrap());
         assert!(gm.as_flattened().iter().zip(wm.as_flattened()).all(|(a, b)| close(*a, *b)), "{gm:?}");
         assert_eq!(back.template.raw.clean_make, "Shroom");
+    }
+
+    #[test]
+    fn records_source_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.dng");
+        let frames = [dir.path().join("IMG_1.dng"), dir.path().join("IMG_2.dng")];
+        let template = synthetic_template().with_sources(&frames);
+        write_linear_dng(&path, &gradient(16, 12), &template, "Shroom Stack test").unwrap();
+        let info = crate::io::read_frame_info(&path).unwrap();
+        assert!(!info.mosaic);
+        assert_eq!(info.sources, vec!["IMG_1.dng", "IMG_2.dng"]);
     }
 
     #[test]
