@@ -23,6 +23,18 @@ fn harness(files: Vec<PathBuf>) -> Harness<'static, ShroomApp> {
         .build_eframe(move |cc| ShroomApp::new(cc, files))
 }
 
+/// Makes `file` available at `to` without copying where possible: a symbolic link on
+/// Unix; on Windows (where symbolic links need extra rights) a hard link, or a copy across
+/// drives.
+fn link_or_copy(file: &Path, to: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(file, to).unwrap();
+    #[cfg(not(unix))]
+    if std::fs::hard_link(file, to).is_err() {
+        std::fs::copy(file, to).unwrap();
+    }
+}
+
 /// Two clicks at `point`, a frame apart.
 fn double_click_at(h: &mut Harness<'static, ShroomApp>, point: eframe::egui::Pos2) {
     for _ in 0..2 {
@@ -411,7 +423,7 @@ fn session_groups_edits_and_renders() {
     let photos4: Vec<&PathBuf> = stack4.iter().filter(|p| !p.to_string_lossy().contains('(')).collect();
     let photos2: Vec<&PathBuf> = stack2.iter().filter(|p| !p.to_string_lossy().contains('(')).take(6).collect();
     for file in photos4.iter().chain(&photos2).copied().chain([helicon]) {
-        std::os::unix::fs::symlink(file, dir.path().join(file.file_name().unwrap())).unwrap();
+        link_or_copy(file, &dir.path().join(file.file_name().unwrap()));
     }
 
     let mut h = harness(Vec::new());
