@@ -16,6 +16,7 @@ use crate::frames::{FrameList, Issue, Severity, preflight};
 use crate::loader::{FullRequest, Loaded, Loader};
 use crate::processing::{Finished, Job, JobError, JobEvent, overall_progress};
 use crate::session_view::{Action, SessionView};
+use crate::toolbar::{self, Icon, Kind};
 use crate::viewer::{self, Pane, TiledImage, ViewState};
 
 const ERROR_COLOR: Color32 = Color32::from_rgb(255, 110, 110);
@@ -484,12 +485,16 @@ impl ShroomApp {
         self.view = ViewState::default();
     }
 
-    /// "Rotate left/right" buttons.
+    /// Big "Rotate left/right" buttons; the orientation is written into the saved result.
     fn rotate_buttons(&mut self, ui: &mut egui::Ui) {
-        if ui.button("Rotate left").on_hover_text("Rotate the stack 90° counter-clockwise (Cmd/Ctrl+[)").clicked() {
+        let left = toolbar::big_button(ui, Icon::RotateLeft, "Rotate left", Kind::Plain)
+            .on_hover_text("Rotate the stack 90° counter-clockwise (Cmd/Ctrl+[)");
+        let right = toolbar::big_button(ui, Icon::RotateRight, "Rotate right", Kind::Plain)
+            .on_hover_text("Rotate the stack 90° clockwise (Cmd/Ctrl+])");
+        if left.clicked() {
             self.rotate(false);
         }
-        if ui.button("Rotate right").on_hover_text("Rotate the stack 90° clockwise (Cmd/Ctrl+])").clicked() {
+        if right.clicked() {
             self.rotate(true);
         }
     }
@@ -613,87 +618,116 @@ impl ShroomApp {
 
     /// Method, parameters, alignment and soft bokeh, shared by Preparation and Session.
     fn parameter_controls(&mut self, ui: &mut egui::Ui) {
-        {
-            let method_label = ui.label("Method");
-            let p = &mut self.params;
-            egui::ComboBox::from_id_salt("method")
-                .selected_text(match p.kind {
-                    MethodKind::DepthMap => "Depth map",
-                    MethodKind::Pyramid => "Pyramid",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut p.kind, MethodKind::DepthMap, "Depth map")
-                        .on_hover_text("Takes each pixel from the sharpest frame. Best for few overlapping objects.");
-                    ui.selectable_value(&mut p.kind, MethodKind::Pyramid, "Pyramid")
-                        .on_hover_text("Combines detail at every scale. Best for complex, overlapping structures.");
-                })
-                .response
-                .labelled_by(method_label.id);
-            ui.separator();
-            match p.kind {
-                MethodKind::DepthMap => {
-                    ui.label("Radius");
-                    ui.add(egui::DragValue::new(&mut p.radius).range(1..=32))
-                        .on_hover_text("Size of the area judged for sharpness. Larger is smoother but less precise.");
-                    ui.label("Smoothing");
-                    ui.add(egui::DragValue::new(&mut p.depth_smoothing).range(0..=20)).on_hover_text(
-                        "How strongly the depth map is smoothed. Higher hides artefacts in smooth areas.",
-                    );
-                }
-                MethodKind::Pyramid => {
-                    ui.label("Smoothing");
-                    ui.add(egui::DragValue::new(&mut p.pyramid_smoothing).range(0..=20))
-                        .on_hover_text("Size of the area compared when picking detail.");
-                }
-            }
-            ui.separator();
-            ui.checkbox(&mut p.align, "Align frames")
-                .on_hover_text("Compensates shifts and focus breathing between frames (recommended).");
-            ui.separator();
-            ui.checkbox(&mut p.bokeh, "Soft bokeh").on_hover_text(
-                "Keeps backgrounds that are out of focus in every frame as soft as in the most blurred frame. \
-                 Expects frames ordered from near to far focus.",
-            );
-            if p.bokeh {
-                let b = &mut p.bokeh_settings;
-                let from_label = ui.label("From");
-                egui::ComboBox::from_id_salt("bokeh_frame")
-                    .selected_text(bokeh_frame_name(b.frame))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut b.frame,
-                            BokehFrame::MostBlurred,
-                            bokeh_frame_name(BokehFrame::MostBlurred),
-                        )
-                        .on_hover_text("Per area, the frame where the background is softest.");
-                        ui.selectable_value(
-                            &mut b.frame,
-                            BokehFrame::NearestFocus,
-                            bokeh_frame_name(BokehFrame::NearestFocus),
-                        )
-                        .on_hover_text("The first frame (focused nearest).");
-                    })
-                    .response
-                    .labelled_by(from_label.id);
-                ui.label("Threshold");
-                ui.add(egui::DragValue::new(&mut b.threshold).range(1..=10))
-                    .on_hover_text("How much detail an area may have and still count as bokeh. Higher finds more.");
+        let p = &mut self.params;
+        for (kind, icon, label, hint) in [
+            (
+                MethodKind::DepthMap,
+                Icon::DepthMap,
+                "Depth map",
+                "Takes each pixel from the sharpest frame. Best for few overlapping objects.",
+            ),
+            (
+                MethodKind::Pyramid,
+                Icon::Pyramid,
+                "Pyramid",
+                "Combines detail at every scale. Best for complex, overlapping structures.",
+            ),
+        ] {
+            if toolbar::big_button(ui, icon, label, Kind::Toggle(p.kind == kind)).on_hover_text(hint).clicked() {
+                p.kind = kind;
             }
         }
+        ui.add_space(4.0);
+        let mut rows: Vec<toolbar::Row> = Vec::new();
+        match p.kind {
+            MethodKind::DepthMap => {
+                let radius = &mut p.radius;
+                rows.push(Box::new(|ui| {
+                    let label = ui.label("Radius");
+                    ui.add(egui::DragValue::new(radius).range(1..=32))
+                        .labelled_by(label.id)
+                        .on_hover_text("Size of the area judged for sharpness. Larger is smoother but less precise.");
+                }));
+                let smoothing = &mut p.depth_smoothing;
+                rows.push(Box::new(|ui| {
+                    let label = ui.label("Smoothing");
+                    ui.add(egui::DragValue::new(smoothing).range(0..=20)).labelled_by(label.id).on_hover_text(
+                        "How strongly the depth map is smoothed. Higher hides artefacts in smooth areas.",
+                    );
+                }));
+            }
+            MethodKind::Pyramid => {
+                let smoothing = &mut p.pyramid_smoothing;
+                rows.push(Box::new(|ui| {
+                    let label = ui.label("Smoothing");
+                    ui.add(egui::DragValue::new(smoothing).range(0..=20))
+                        .labelled_by(label.id)
+                        .on_hover_text("Size of the area compared when picking detail.");
+                }));
+            }
+        }
+        let align = &mut p.align;
+        rows.push(Box::new(|ui| {
+            ui.checkbox(align, "Align frames")
+                .on_hover_text("Compensates shifts and focus breathing between frames (recommended).");
+            ui.label("");
+        }));
+        toolbar::rows(ui, "method_settings", rows);
+        ui.separator();
+        toolbar::stack(ui, |ui| {
+            toolbar::row(ui, |ui| {
+                ui.checkbox(&mut p.bokeh, "Soft bokeh").on_hover_text(
+                    "Keeps backgrounds that are out of focus in every frame as soft as in the most blurred frame. \
+                     Expects frames ordered from near to far focus.",
+                );
+            });
+            let b = &mut p.bokeh_settings;
+            ui.add_enabled_ui(p.bokeh, |ui| {
+                toolbar::row(ui, |ui| {
+                    egui::ComboBox::from_id_salt("bokeh_frame")
+                        .selected_text(bokeh_frame_name(b.frame))
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut b.frame,
+                                BokehFrame::MostBlurred,
+                                bokeh_frame_name(BokehFrame::MostBlurred),
+                            )
+                            .on_hover_text("Per area, the frame where the background is softest.");
+                            ui.selectable_value(
+                                &mut b.frame,
+                                BokehFrame::NearestFocus,
+                                bokeh_frame_name(BokehFrame::NearestFocus),
+                            )
+                            .on_hover_text("The first frame (focused nearest).");
+                        })
+                        .response
+                        .on_hover_text("Frame the soft background is taken from");
+                });
+                toolbar::row(ui, |ui| {
+                    let label = ui.label("Threshold");
+                    ui.add(egui::DragValue::new(&mut b.threshold).range(1..=10))
+                        .labelled_by(label.id)
+                        .on_hover_text("How much detail an area may have and still count as bokeh. Higher finds more.");
+                });
+            });
+        });
+    }
+
+    /// The big green button that starts stacking.
+    fn render_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
+        ui.add_enabled_ui(enabled, |ui| toolbar::big_button(ui, Icon::Render, label, Kind::Primary)).inner
     }
 
     fn preparation_toolbar(&mut self, ui: &mut egui::Ui) {
         let mut render = false;
-        ui.horizontal(|ui| {
+        toolbar::bar(ui, |ui| {
             self.parameter_controls(ui);
             ui.separator();
             self.rotate_buttons(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                render = ui
-                    .add_enabled(
-                        !self.session.is_batch_running(),
-                        egui::Button::new(RichText::new("Render").strong()).min_size(Vec2::new(90.0, 0.0)),
-                    )
+                render = Self::render_button(ui, "Render", !self.session.is_batch_running())
+                    .on_hover_text("Align and stack the frames")
                     .on_disabled_hover_text("A batch is running in Session.")
                     .clicked();
             });
@@ -724,7 +758,7 @@ impl ShroomApp {
                 None => ui.label(RichText::new("No folder").weak()),
             };
         });
-        ui.horizontal(|ui| {
+        toolbar::bar(ui, |ui| {
             ui.add_enabled_ui(!self.session.is_batch_running(), |ui| self.parameter_controls(ui));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 match self.session.batch_progress() {
@@ -737,15 +771,15 @@ impl ShroomApp {
                     }
                     None => {
                         let n = self.session.checked_count();
-                        render = ui
-                            .add_enabled(
-                                n > 0 && self.running.is_none(),
-                                egui::Button::new(RichText::new(format!("Render selected ({n})")).strong()),
-                            )
-                            .on_hover_text(
-                                "Stack the checked stacks one after another; results are saved next to the originals.",
-                            )
-                            .clicked();
+                        render = Self::render_button(
+                            ui,
+                            &format!("Render selected ({n})"),
+                            n > 0 && self.running.is_none(),
+                        )
+                        .on_hover_text(
+                            "Stack the checked stacks one after another; results are saved next to the originals.",
+                        )
+                        .clicked();
                     }
                 }
             });
@@ -775,53 +809,28 @@ impl ShroomApp {
     }
 
     fn postprocessing_toolbar(&mut self, ui: &mut egui::Ui) {
-        let Some(done) = &self.done else { return };
-        let mut rotate = None;
+        if self.done.is_none() {
+            return;
+        }
         let mut save = false;
         let mut new_stack = false;
-        ui.horizontal(|ui| {
-            let s = &done.finished.settings;
-            let method = match s.method {
-                Method::DepthMap { radius, smoothing } => format!("Depth map (radius {radius}, smoothing {smoothing})"),
-                Method::Pyramid { smoothing } => format!("Pyramid (smoothing {smoothing})"),
-            };
-            let img = done.retouch.image();
-            let (w, h) = self.orientation.display_size(img.width() as f32, img.height() as f32);
-            let bokeh = if s.bokeh.is_some() { " · soft bokeh" } else { "" };
-            ui.label(format!("{method}{bokeh} · {} images · {w}×{h}", done.finished.paths.len()));
+        toolbar::bar(ui, |ui| {
+            self.brush_toolbar(ui);
             ui.separator();
-            ui.add_enabled(!self.brush.active, egui::Checkbox::new(&mut self.show_map, "Show depth map"))
-                .on_hover_text("Which frame each part of the result comes from (blue = first, red = last).");
-            if s.bokeh.is_some() {
-                let found = done.bokeh.is_some();
-                ui.add_enabled(found, egui::Checkbox::new(&mut self.show_bokeh, "Show soft bokeh area"))
-                    .on_hover_text("Areas taken from the bokeh frame, tinted.")
-                    .on_disabled_hover_text("No background was found that is out of focus in every frame.");
-            }
-            ui.separator();
-            if ui.button("Rotate left").on_hover_text("Rotate the result 90° counter-clockwise (Cmd/Ctrl+[)").clicked()
-            {
-                rotate = Some(false);
-            }
-            if ui.button("Rotate right").on_hover_text("Rotate the result 90° clockwise (Cmd/Ctrl+])").clicked() {
-                rotate = Some(true);
-            }
+            self.rotate_buttons(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 save = ui
-                    .add_enabled(
-                        self.saving.is_none() && !self.dialogs.is_open(),
-                        egui::Button::new(RichText::new("Save…").strong()),
-                    )
+                    .add_enabled_ui(self.saving.is_none() && !self.dialogs.is_open(), |ui| {
+                        toolbar::big_button(ui, Icon::Save, "Save…", Kind::Plain)
+                    })
+                    .inner
                     .on_hover_text("Save the result as Linear DNG")
                     .clicked();
-                new_stack =
-                    ui.button("New stack").on_hover_text("Back to Preparation (discards this result)").clicked();
+                new_stack = toolbar::big_button(ui, Icon::NewStack, "New stack", Kind::Plain)
+                    .on_hover_text("Back to Preparation (discards this result)")
+                    .clicked();
             });
         });
-        self.brush_toolbar(ui);
-        if let Some(clockwise) = rotate {
-            self.rotate(clockwise);
-        }
         if save {
             self.save();
         }
@@ -830,46 +839,59 @@ impl ShroomApp {
         }
     }
 
+    /// Brush button with its size and softness, plus undo and redo.
     fn brush_toolbar(&mut self, ui: &mut egui::Ui) {
         let Some(done) = &mut self.done else { return };
         let (mut undo, mut redo) = (false, false);
-        ui.horizontal(|ui| {
-            let tool = &mut self.brush;
-            if ui
-                .selectable_label(tool.active, "Brush")
-                .on_hover_text("Paint the selected input frame into the result (B)")
-                .clicked()
-            {
-                tool.active = !tool.active;
-            }
-            ui.add_enabled_ui(tool.active, |ui| {
-                ui.label("Size");
-                ui.add(egui::Slider::new(&mut tool.brush.radius, 2.0..=600.0).logarithmic(true).suffix(" px"))
+        let tool = &mut self.brush;
+        if toolbar::big_button(ui, Icon::Brush, "Brush", Kind::Toggle(tool.active))
+            .on_hover_text("Paint the selected input frame into the result (B)")
+            .clicked()
+        {
+            tool.active = !tool.active;
+        }
+        ui.add_space(4.0);
+        let brush = &mut tool.brush;
+        let active = tool.active;
+        toolbar::rows(
+            ui,
+            "brush_settings",
+            vec![
+                Box::new(|ui| {
+                    let label = ui.add_enabled(active, egui::Label::new("Size"));
+                    ui.add_enabled(
+                        active,
+                        egui::Slider::new(&mut brush.radius, 2.0..=600.0).logarithmic(true).suffix(" px"),
+                    )
+                    .labelled_by(label.id)
                     .on_hover_text("Brush radius in image pixels ([ and ] change it)");
-                ui.label("Softness");
-                ui.add(egui::Slider::new(&mut tool.brush.softness, 0.0..=1.0))
-                    .on_hover_text("0 = hard edge, 1 = soft fall-off");
-            });
-            ui.separator();
-            undo = ui
-                .add_enabled(done.retouch.can_undo(), egui::Button::new("Undo"))
-                .on_hover_text("Cmd/Ctrl+Z")
-                .clicked();
-            redo = ui
-                .add_enabled(done.retouch.can_redo(), egui::Button::new("Redo"))
-                .on_hover_text("Shift+Cmd/Ctrl+Z")
-                .clicked();
-            if tool.active {
-                let hint = match self.selected.and_then(|i| self.frames.frames.get(i)) {
-                    None => "Select the frame to paint from in the list.".to_string(),
-                    Some(f) if tool.source.as_ref().is_some_and(|(p, _)| *p == f.path) => {
-                        format!("Painting from {}. Space+drag pans.", f.file_name())
-                    }
-                    Some(f) => format!("Loading {}…", f.file_name()),
-                };
-                ui.label(RichText::new(hint).weak());
-            }
-        });
+                }),
+                Box::new(|ui| {
+                    let label = ui.add_enabled(active, egui::Label::new("Softness"));
+                    ui.add_enabled(active, egui::Slider::new(&mut brush.softness, 0.0..=1.0))
+                        .labelled_by(label.id)
+                        .on_hover_text("0 = hard edge, 1 = soft fall-off");
+                }),
+                Box::new(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        undo = ui
+                            .add_enabled_ui(done.retouch.can_undo(), |ui| {
+                                toolbar::icon_button(ui, Icon::Undo, "Undo", "Undo (Cmd/Ctrl+Z)")
+                            })
+                            .inner
+                            .clicked();
+                        redo = ui
+                            .add_enabled_ui(done.retouch.can_redo(), |ui| {
+                                toolbar::icon_button(ui, Icon::Redo, "Redo", "Redo (Shift+Cmd/Ctrl+Z)")
+                            })
+                            .inner
+                            .clicked();
+                    });
+                    ui.label("");
+                }),
+            ],
+        );
         if self.brush.active {
             self.show_map = false;
         }
@@ -1157,6 +1179,7 @@ impl ShroomApp {
             &[Pane { label: &label, image, placeholder, overlay: None }],
             None,
             self.orientation,
+            |_| {},
         );
         self.view = view;
     }
@@ -1186,7 +1209,7 @@ impl ShroomApp {
             },
         ];
         let mut view = self.view;
-        viewer::show(ui, &mut view, &panes, None, self.orientation);
+        viewer::show(ui, &mut view, &panes, None, self.orientation, |_| {});
         self.view = view;
     }
 
@@ -1207,9 +1230,40 @@ impl ShroomApp {
             },
         ];
         let brush = self.brush.active.then_some(self.brush.brush.radius);
+        let s = &done.finished.settings;
+        let method = match s.method {
+            Method::DepthMap { radius, smoothing } => format!("Depth map (radius {radius}, smoothing {smoothing})"),
+            Method::Pyramid { smoothing } => format!("Pyramid (smoothing {smoothing})"),
+        };
+        let (w, h) = self.orientation.display_size(size.x, size.y);
+        let bokeh = if s.bokeh.is_some() { " · soft bokeh" } else { "" };
+        let summary = format!("{method}{bokeh} · {} images · {w}×{h}", done.finished.paths.len());
+        // While painting, the bar tells where the brush paints from instead.
+        let tool = &self.brush;
+        let info = match (tool.active, frame) {
+            (false, _) => RichText::new(summary).weak(),
+            (true, None) => RichText::new("Select the frame to paint from in the list."),
+            (true, Some(f)) if tool.source.as_ref().is_some_and(|(p, _)| *p == f.path) => {
+                RichText::new(format!("Painting from {}", f.file_name()))
+            }
+            (true, Some(f)) => RichText::new(format!("Loading {}…", f.file_name())),
+        };
+        let (mut show_map, mut show_bokeh) = (self.show_map, self.show_bokeh);
+        let options = |ui: &mut egui::Ui| {
+            ui.add_enabled(brush.is_none(), egui::Checkbox::new(&mut show_map, "Show depth map"))
+                .on_hover_text("Which frame each part of the result comes from (blue = first, red = last).");
+            if s.bokeh.is_some() {
+                ui.add_enabled(done.bokeh.is_some(), egui::Checkbox::new(&mut show_bokeh, "Show soft bokeh area"))
+                    .on_hover_text("Areas taken from the bokeh frame, tinted.")
+                    .on_disabled_hover_text("No background was found that is out of focus in every frame.");
+            }
+            ui.separator();
+            ui.label(info);
+        };
         let mut view = self.view;
-        let response = viewer::show(ui, &mut view, &panes, brush, self.orientation);
+        let response = viewer::show(ui, &mut view, &panes, brush, self.orientation, options);
         self.view = view;
+        (self.show_map, self.show_bokeh) = (show_map, show_bokeh);
         self.paint(response);
     }
 }

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 
 use crate::app::{ShroomApp, Workspace};
 
@@ -39,8 +39,6 @@ fn switching_method_shows_its_parameters() {
     let mut h = harness(Vec::new());
     h.run();
     h.get_by_label("Radius");
-    h.get_by_label("Method").click();
-    h.run();
     h.get_by_label("Pyramid").click();
     h.run();
     assert!(h.query_by_label("Radius").is_none());
@@ -51,15 +49,16 @@ fn switching_method_shows_its_parameters() {
 fn soft_bokeh_shows_its_parameters() {
     let mut h = harness(Vec::new());
     h.run();
-    assert!(h.query_by_label("Threshold").is_none());
+    let by = egui_kittest::kittest::by;
+    assert!(h.get(by().value("Most blurred frame")).accesskit_node().is_disabled());
     h.get_by_label("Soft bokeh").click();
     h.run();
-    h.get_by_label("Threshold");
-    h.get_by_label("From").click();
+    assert!(!h.get(by().value("Most blurred frame")).accesskit_node().is_disabled());
+    h.get(by().value("Most blurred frame")).click();
     h.run();
     h.get_by_label("Nearest focus").click();
     h.run();
-    h.get(egui_kittest::kittest::by().label("From").value("Nearest focus"));
+    h.get(by().value("Nearest focus"));
 }
 
 /// Loads Stack 3 from `examples/` and writes screenshots to `target/ui-screenshots/`.

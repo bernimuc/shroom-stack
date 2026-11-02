@@ -7,6 +7,7 @@ mod frames;
 mod loader;
 mod processing;
 mod session_view;
+mod toolbar;
 mod viewer;
 
 #[cfg(test)]

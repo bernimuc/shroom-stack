@@ -239,13 +239,15 @@ pub struct ViewResponse {
 /// Shows one or more panes side by side with shared zoom/pan, plus the zoom controls.
 /// Images are given in stored (sensor) orientation and shown rotated by `orientation`;
 /// the view state works in display coordinates. `brush` (radius in image pixels) draws a
-/// brush outline at the pointer in every pane.
+/// brush outline at the pointer in every pane. `options` adds display options to the
+/// controls below the panes.
 pub fn show(
     ui: &mut egui::Ui,
     view: &mut ViewState,
     panes: &[Pane],
     brush: Option<f32>,
     orientation: Orientation,
+    options: impl FnOnce(&mut egui::Ui),
 ) -> ViewResponse {
     let ppp = ui.ctx().pixels_per_point();
     let stored_size = panes.iter().find_map(|p| p.image.map(|(_, s)| s));
@@ -364,7 +366,19 @@ pub fn show(
     // Controls below the panes.
     let controls = Rect::from_min_max(Pos2::new(area.min.x, views_rect.max.y), area.max);
     ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
-        ui.horizontal_centered(|ui| controls_bar(ui, view, image_size, pane_rects[0].size(), ppp, brush.is_some()));
+        ui.horizontal_centered(|ui| {
+            controls_bar(ui, view, image_size, pane_rects[0].size(), ppp);
+            ui.separator();
+            options(ui);
+            let hint = if brush.is_some() {
+                "Wheel: zoom · Space+drag: pan · Drag: paint"
+            } else {
+                "Wheel: zoom · Drag: pan · Double-click: fit / 1:1"
+            };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(hint).weak()).truncate());
+            });
+        });
     });
     // Report the pointer in stored-image coordinates.
     let hovered = hovered.zip(stored_size).map(|(d, s)| {
@@ -374,7 +388,7 @@ pub fn show(
     ViewResponse { hovered, painting }
 }
 
-fn controls_bar(ui: &mut egui::Ui, view: &mut ViewState, image: Option<Vec2>, pane: Vec2, ppp: f32, brush: bool) {
+fn controls_bar(ui: &mut egui::Ui, view: &mut ViewState, image: Option<Vec2>, pane: Vec2, ppp: f32) {
     let Some(image) = image else {
         ui.add_enabled(false, egui::Label::new("–"));
         return;
@@ -401,12 +415,6 @@ fn controls_bar(ui: &mut egui::Ui, view: &mut ViewState, image: Option<Vec2>, pa
     if slider.changed() {
         view.zoom_to((lo + t * (hi - lo)).exp(), Vec2::ZERO);
     }
-    let hint = if brush {
-        "Wheel: zoom · Space+drag: pan · Drag: paint"
-    } else {
-        "Wheel: zoom · Drag: pan · Double-click: fit / 1:1"
-    };
-    ui.label(egui::RichText::new(hint).weak());
 }
 
 #[cfg(test)]
