@@ -347,6 +347,46 @@ pub fn move_to_next(stacks: &mut Vec<Stack>, stack: usize, frame: usize) {
     merge_with_previous(stacks, stack + 2);
 }
 
+/// Moves `frames` into stack `to`, or into a new stack if `to` is `None`. Stacks keep
+/// shooting order (the order of all stacks' frames before the move), stacks are ordered by
+/// their first frame, and stacks left empty are removed (their results go along to the
+/// target). Returns the target's index afterwards.
+pub fn move_frames(stacks: &mut Vec<Stack>, frames: &[PathBuf], to: Option<usize>) -> Option<usize> {
+    let order: HashMap<PathBuf, usize> =
+        stacks.iter().flat_map(|s| s.frames.iter().cloned()).enumerate().map(|(i, p)| (p, i)).collect();
+    let moving: Vec<PathBuf> = frames.iter().filter(|p| order.contains_key(*p)).cloned().collect();
+    let first = moving.iter().min_by_key(|p| order[*p])?.clone();
+    let target = match to {
+        Some(k) if k < stacks.len() => k,
+        Some(_) => return None,
+        None => {
+            stacks.push(reviewed());
+            stacks.len() - 1
+        }
+    };
+    let mut excluded = HashSet::new();
+    for (_, s) in stacks.iter_mut().enumerate().filter(|(i, _)| *i != target) {
+        s.frames.retain(|p| !moving.contains(p));
+        excluded.extend(moving.iter().filter(|p| s.excluded.remove(*p)).cloned());
+    }
+    let t = &mut stacks[target];
+    for p in &moving {
+        if !t.frames.contains(p) {
+            t.frames.push(p.clone());
+        }
+    }
+    t.excluded.extend(excluded);
+    t.frames.sort_by_key(|p| order[p]);
+    let results: Vec<PathBuf> =
+        stacks.iter_mut().filter(|s| s.frames.is_empty()).flat_map(|s| std::mem::take(&mut s.results)).collect();
+    stacks.retain(|s| !s.frames.is_empty());
+    stacks.sort_by_key(|s| order[&s.frames[0]]);
+    let target = stacks.iter().position(|s| s.frames.contains(&first))?;
+    stacks[target].results.extend(results);
+    stacks[target].results.sort();
+    Some(target)
+}
+
 /// A stack whose boundary the user has decided on.
 fn reviewed() -> Stack {
     Stack { boundary: 1.0, ..Default::default() }
@@ -646,6 +686,32 @@ mod tests {
         assert_eq!(stacks[1].results, vec![p("moved.dng")]);
         assert_eq!(stacks[2].results, vec![p("006-stacked-2.dng")]);
         assert_eq!(unmatched, vec![p("other.dng"), p("foreign-stacked.dng")]);
+    }
+
+    #[test]
+    fn moving_selected_frames() {
+        let name = |s: &Stack| s.frames.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        // Frames 1 and 5 into the first stack: shooting order is kept.
+        let mut s = stacks_of(&[3, 3]);
+        s[1].excluded.insert(PathBuf::from("/p/5"));
+        assert_eq!(move_frames(&mut s, &[PathBuf::from("/p/5"), PathBuf::from("/p/1")], Some(0)), Some(0));
+        assert_eq!(name(&s[0]), vec!["/p/0", "/p/1", "/p/2", "/p/5"]);
+        assert_eq!(name(&s[1]), vec!["/p/3", "/p/4"]);
+        assert!(s[0].excluded.contains(Path::new("/p/5")) && s[1].excluded.is_empty());
+
+        // Into a new stack, which takes its place by its first frame.
+        let mut s = stacks_of(&[3, 3]);
+        assert_eq!(move_frames(&mut s, &[PathBuf::from("/p/4"), PathBuf::from("/p/5")], None), Some(2));
+        assert_eq!(s.iter().map(|s| s.frames.len()).collect::<Vec<_>>(), vec![3, 1, 2]);
+
+        // Emptying a stack removes it; its results go to the target.
+        let mut s = stacks_of(&[2, 2]);
+        s[1].results.push(PathBuf::from("/p/r.dng"));
+        let all: Vec<PathBuf> = s[1].frames.clone();
+        assert_eq!(move_frames(&mut s, &all, Some(0)), Some(0));
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].results, vec![PathBuf::from("/p/r.dng")]);
+        assert_eq!(move_frames(&mut s, &[PathBuf::from("/p/nope")], Some(0)), None);
     }
 
     #[test]

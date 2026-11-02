@@ -52,8 +52,18 @@ fn double_click_at(h: &mut Harness<'static, ShroomApp>, point: eframe::egui::Pos
 }
 
 #[test]
+fn starts_in_manage_stacks() {
+    let mut h = harness(Vec::new());
+    h.run();
+    assert_eq!(h.state().workspace(), Workspace::Session);
+    h.get_by_label("Open folder…");
+}
+
+#[test]
 fn render_without_images_reports_error() {
     let mut h = harness(Vec::new());
+    h.run();
+    h.get_by_label("Preparation").click();
     h.run();
     h.get_by_label_contains("Add raw files");
     assert!(h.query_by_label("Clear").is_some());
@@ -65,6 +75,8 @@ fn render_without_images_reports_error() {
 #[test]
 fn fullscreen_toggles_with_f_and_escape() {
     let mut h = harness(Vec::new());
+    h.run();
+    h.get_by_label("Preparation").click();
     h.run();
     // Not over a pane: nothing happens.
     h.hover_at(eframe::egui::Pos2::new(700.0, 60.0));
@@ -224,9 +236,11 @@ fn stack_through_ui() {
     step_until(&mut h, "files", |a| a.is_idle());
     h.get_by_label("Render").click();
     h.run();
-    assert_eq!(h.state().workspace(), Workspace::Processing);
-    step_until(&mut h, "live images", |a| a.has_live_map() || a.workspace() != Workspace::Processing);
-    if h.state().workspace() == Workspace::Processing {
+    // Postprocessing shows the progress and live images while stacking runs.
+    assert_eq!(h.state().workspace(), Workspace::Postprocessing);
+    assert!(h.state().is_processing());
+    step_until(&mut h, "live images", |a| a.has_live_map() || !a.is_processing());
+    if h.state().is_processing() {
         h.render().unwrap().save(out.join("processing.png")).unwrap();
     }
     step_until(&mut h, "result", |a| a.workspace() == Workspace::Postprocessing && a.is_idle());
@@ -391,7 +405,7 @@ fn soft_bokeh_stack() {
 fn session_without_folder_explains_itself() {
     let mut h = harness(Vec::new());
     h.run();
-    h.get_by_label("Session").click();
+    h.get_by_label("Manage stacks").click();
     h.run();
     assert_eq!(h.state().workspace(), Workspace::Session);
     h.get_by_label_contains("Open a folder");
@@ -428,7 +442,7 @@ fn session_groups_edits_and_renders() {
 
     let mut h = harness(Vec::new());
     h.run();
-    h.get_by_label("Session").click();
+    h.get_by_label("Manage stacks").click();
     h.state_mut().open_folder_for_test(dir.path().to_path_buf());
     step_until(&mut h, "grouping", |a| a.is_idle());
     let sizes: Vec<usize> = h.state_mut().session().stacks().iter().map(|s| s.frames.len()).collect();
@@ -508,9 +522,70 @@ fn session_groups_edits_and_renders() {
     let at = h.get_by_label(&photo.file_name().unwrap().to_string_lossy()).rect().center();
     double_click_at(&mut h, at);
     assert_eq!(h.state_mut().session().preview_path(), Some(photo.as_path()));
+    // → shows the next photo; X excludes it from stacking, P includes it again.
+    let second = h.state_mut().session().stacks()[three].frames[1].clone();
+    h.key_press(eframe::egui::Key::ArrowRight);
+    h.run();
+    assert_eq!(h.state_mut().session().preview_path(), Some(second.as_path()));
+    h.key_press(eframe::egui::Key::X);
+    h.run();
+    assert!(h.state_mut().session().stacks()[three].excluded.contains(&second));
+    h.render().unwrap().save(out.join("session_preview_excluded.png")).unwrap();
+    h.key_press(eframe::egui::Key::P);
+    h.run();
+    assert!(h.state_mut().session().stacks()[three].excluded.is_empty());
+    h.key_press(eframe::egui::Key::ArrowLeft);
+    h.run();
+    assert_eq!(h.state_mut().session().preview_path(), Some(photo.as_path()));
     h.get_by_label("Back to stacks").click();
     h.run();
     assert_eq!(h.state_mut().session().preview_path(), None);
+
+    // Selecting several photos: click, Shift-click extends, Cmd-click removes one.
+    let stacks: Vec<Vec<PathBuf>> = h.state_mut().session().stacks().iter().map(|s| s.frames.clone()).collect();
+    let small = stacks.iter().position(|f| f.len() == 3).unwrap();
+    let other = stacks.iter().rposition(|f| f.len() == 3).unwrap();
+    assert_ne!(small, other);
+    let label = |p: &PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+    h.get_by_label(&label(&stacks[other][0])).click();
+    h.run();
+    h.get_by_label(&label(&stacks[other][2])).click_modifiers(eframe::egui::Modifiers::SHIFT);
+    h.run();
+    assert_eq!(h.state_mut().session().selected_for_test(), stacks[other]);
+    h.get_by_label(&label(&stacks[other][1])).click_modifiers(eframe::egui::Modifiers::COMMAND);
+    h.run();
+    assert_eq!(h.state_mut().session().selected_for_test(), vec![stacks[other][0].clone(), stacks[other][2].clone()]);
+    h.get_by_label(&label(&stacks[other][0])).click_secondary();
+    h.run();
+    h.get_by_label("Move 2 photos to");
+    h.render().unwrap().save(out.join("session_multi_select.png")).unwrap();
+    h.key_press(eframe::egui::Key::Escape);
+    h.run();
+    h.state_mut().session().move_selected_for_test(Some(small));
+    h.run();
+    let sizes: Vec<usize> = h.state_mut().session().stacks().iter().map(|s| s.frames.len()).collect();
+    assert!(sizes.contains(&5) && sizes.contains(&1), "{sizes:?}");
+
+    // Delete, then Cancel: nothing happens.
+    let single = sizes.iter().position(|&n| n == 1).unwrap();
+    let lone = h.state_mut().session().stacks()[single].frames[0].clone();
+    h.get_by_label(&label(&lone)).click();
+    h.run();
+    h.key_press(eframe::egui::Key::Delete);
+    h.run();
+    h.get_by_label("Move to Trash?");
+    h.get_by_label("Cancel").click();
+    h.run();
+    assert!(lone.exists());
+    // The stack's trash button, confirmed: the stack and its file are gone.
+    h.get_by_label(&format!("Delete stack {}", single + 1)).click();
+    h.run();
+    h.render().unwrap().save(out.join("session_delete.png")).unwrap();
+    h.get_by_label("Move to Trash").click();
+    h.run();
+    assert!(!lone.exists());
+    assert_eq!(h.state_mut().session().stacks().len(), sizes.len() - 1);
+    h.get_by_label_contains("Moved 1 photo to the Trash");
 
     // Opening a stack loads it into Preparation.
     h.query_all_by_label("Open").next().unwrap().click();

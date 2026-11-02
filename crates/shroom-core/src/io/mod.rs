@@ -53,6 +53,8 @@ pub struct FrameInfo {
     pub mosaic: bool,
     /// For stacking results: file names of the frames they were stacked from (from XMP).
     pub sources: Vec<String>,
+    /// For stacking results: the settings they were made with (from XMP).
+    pub settings: Option<crate::stack::StackSettings>,
     pub exposure: Exposure,
 }
 
@@ -96,6 +98,7 @@ mod tests {
             camera_values_known: true,
             mosaic: true,
             sources: Vec::new(),
+            settings: None,
             exposure: Default::default(),
         }
     }

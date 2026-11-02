@@ -81,7 +81,7 @@ fn write_to(path: &Path, image: &RgbImage, template: &DngTemplate, software: &st
     dng.root_ifd_mut().copy_with_override(template.root_tags.iter().map(|(t, v)| (t, v)));
     let uuid = uuid::Uuid::new_v4().to_string();
     let xmp = template.xmp.as_deref().map(|x| super::xmp::for_result(x, &uuid));
-    if let Some(xmp) = super::xmp::with_ingredients(xmp.as_deref(), &template.sources) {
+    if let Some(xmp) = super::xmp::with_provenance(xmp.as_deref(), &template.sources, &template.params) {
         dng.xpacket(xmp).map_err(enc_err)?;
     }
     dng.root_ifd_mut().add_tag(TiffCommonTag::Software, software);
@@ -129,15 +129,20 @@ mod tests {
     }
 
     #[test]
-    fn records_source_frames() {
+    fn records_sources_and_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.dng");
         let frames = [dir.path().join("IMG_1.dng"), dir.path().join("IMG_2.dng")];
-        let template = synthetic_template().with_sources(&frames);
+        let settings = crate::stack::StackSettings {
+            bokeh: Some(crate::stack::SoftBokeh::DEFAULT),
+            ..crate::stack::StackSettings::new(crate::stack::Method::DepthMap { radius: 6, smoothing: 3 })
+        };
+        let template = synthetic_template().with_sources(&frames).with_settings(&settings);
         write_linear_dng(&path, &gradient(16, 12), &template, "Shroom Stack test").unwrap();
         let info = crate::io::read_frame_info(&path).unwrap();
         assert!(!info.mosaic);
         assert_eq!(info.sources, vec!["IMG_1.dng", "IMG_2.dng"]);
+        assert_eq!(info.settings, Some(settings));
     }
 
     #[test]

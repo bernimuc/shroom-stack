@@ -211,7 +211,7 @@ fn stack_files(files: &[PathBuf], output: &Path, settings: &StackSettings, outpu
     }
 
     let first = io::load_linear(&paths[0])?;
-    let template = first.template.with_sources(&paths);
+    let template = first.template.with_sources(&paths).with_settings(settings);
     io::write_linear_dng(output, &result.image, &template, concat!("Shroom Stack ", env!("CARGO_PKG_VERSION")))?;
     if let Some(path) = outputs.preview {
         save_jpeg(&render_display(&result.image, &first.color, Some(2048)), path)?;

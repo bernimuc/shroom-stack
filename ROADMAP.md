@@ -169,8 +169,9 @@ retouch brush enough, or is the mask brush wanted as well?
 
 ## 4. Stack management
 
-**Status:** implemented in the app (workspace "Session", batch rendering, session file
-`Shroom Stack session.json`); colour labels and keywords follow with the plugin
+**Status:** implemented in the app (workspace "Manage stacks", formerly "Session"; batch
+rendering; session file `Shroom Stack session.json`, which lists each stack's `frames`,
+`excluded` and `results`); colour labels and keywords follow with the plugin
 (feature 5), which reads the session file. Differences from the plan below:
 - Boundary evidence: pause relative to the 5 pauses on each side, changed camera, size,
   aperture, focal length (strong), orientation (medium), exposure time or ISO (weak, may
@@ -203,7 +204,7 @@ thresholds.
 - To check: whether Canon's focus bracketing writes a sequence marker into the maker
   notes – that would make automatic stacks near-certain.
 
-**UI:** workspace "Session" – stacks as rows of thumbnails; split, merge, move or exclude
+**UI:** workspace "Manage stacks" – stacks as rows of thumbnails; split, merge, move or exclude
 frames; open a stack in Preparation; later batch processing.
 
 **Q4.1** How are stacks shot? **A:** see "Shooting practice" above.

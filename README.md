@@ -28,37 +28,56 @@ cargo run --release -p shroom-ui -- frames/*.dng # app with files preloaded
 ./scripts/bundle-macos.sh                        # builds target/bundle/Shroom Stack.app
 ```
 
-On Linux the usual windowing libraries are needed (e.g. on Debian/Ubuntu:
+On Linux the usual windowing libraries are needed (e.g. on Debian/Ubuntu:[Shroom Stack session.json](../stack-samples/pilze-20261031/100CANON/Shroom%20Stack%20session.json)
 `libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libgl1-mesa-dev`).
 
 ## Using the app
 
-0. **Session** (optional): "Open folder…" (or drop a folder) groups its photos into
-   stacks, using pauses between shots, changed camera settings and changed pictures.
-   Uncertain boundaries are marked "Check: new stack?" with the reasons. Right-click a
-   thumbnail to start a new stack there, move photos to the previous or next stack, or
-   exclude them; "Merge with previous" joins stacks. **Open** loads a stack into
-   Preparation; **Render selected** stacks the checked stacks one after another with the
-   chosen method and saves each result next to its originals (`<first photo>-stacked.dng`,
-   never overwriting). The grouping is kept in `Shroom Stack session.json` in the folder
-   and restored when it is opened again; stacking results in the folder are not listed.
-1. **Preparation:** add raw files ("Add images…", drag & drop of files or a folder).
+1. **Manage stacks** (where the app starts): "Open folder…" (or drop a folder) groups
+   its photos into stacks, using pauses between shots, changed camera settings and
+   changed pictures. Uncertain boundaries are marked "Check: new stack?" with the
+   reasons.
+   - Right-click a thumbnail to start a new stack there, move photos to the previous or
+     next stack, or exclude them; "Merge with previous" joins stacks.
+   - Select several files with Cmd/Ctrl-click and Shift-click (Esc clears the selection);
+     right-click to move the selected photos to any stack or a new one, or to exclude or
+     include them.
+   - **Delete** (or Backspace), "Move to Trash…" in the context menu and the red trash
+     button of a stack move files to the system trash, after asking.
+   - Stacking results appear in a green row below their stack's photos, with the method
+     as an icon and the settings in the tooltip. A result is matched to its stack by the
+     source frames recorded in it (older results by session file or file name).
+   - Double-click a thumbnail to view it on its own: ← → step through the files, P and X
+     include or exclude the photo, Esc or "Back to stacks" returns to the list.
+   - The slider below the list sets the thumbnail size.
+   - **Open** loads a stack into Preparation; **Render selected** stacks the checked
+     stacks one after another and saves each result next to its originals
+     (`<first photo>-stacked.dng`, numbered instead of overwriting).
+
+   The grouping is kept in `Shroom Stack session.json` in the folder and restored when it
+   is opened again.
+2. **Preparation:** add raw files ("Add images…", drag & drop of files or a folder).
    They are sorted by capture time; reorder with Up/Down/Reverse if needed. Choose the
    method and parameters (optionally **Soft bokeh** with its source frame and
    threshold), then **Render**. Checks run first (frame count, sizes,
    cameras, shooting order, memory).
-2. **Processing:** progress and a live view of the current frame and the depth map;
-   **Cancel** goes back to Preparation.
-3. **Postprocessing:** compare any input frame (aligned) with the result or the depth
-   map; **Show soft bokeh area** tints what soft bokeh replaced. **Brush** (B) paints the selected frame into the result; size `[` `]`, undo
-   Cmd/Ctrl+Z, redo Shift+Cmd/Ctrl+Z. **Save…** writes a Linear DNG.
+3. **Postprocessing:** while stacking runs, the progress and a live view of the current
+   frame and the depth map (**Cancel** goes back to Preparation). Then compare any input
+   frame (aligned) with the result or the depth map; **Show soft bokeh area** tints what
+   soft bokeh replaced. **Brush** (B) paints the selected frame into the result; size
+   `[` `]`, undo Cmd/Ctrl+Z, redo Shift+Cmd/Ctrl+Z. **Save…** writes a Linear DNG (a free
+   name is suggested).
+
+Results record the source frames (`xmpMM:Ingredients`) and the stacking settings in their
+XMP metadata.
 
 Orientation: taken from the camera (EXIF); **Rotate left/right** (Cmd/Ctrl+[ / ]) in
 Preparation and Postprocessing override it for the whole stack and for the saved file.
 
-Viewer: mouse wheel zooms at the cursor, dragging pans (with the brush: Space+drag),
-double-click switches between fit and 1:1 at the clicked point; Fit, 1:1, −, + and the
-slider are below the image.
+Viewer: mouse wheel and + / − zoom at the cursor, dragging pans (with the brush:
+Space+drag), double-click switches between fit and 1:1 at the clicked point; Fit, 1:1,
+−, + and the slider are below the image. **F** over an image shows it full screen without
+any other controls; F or Esc goes back.
 
 ## Command line
 

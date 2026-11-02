@@ -9,6 +9,7 @@ const SMALL: f32 = 20.0;
 const ROW_SPACING: f32 = 2.0;
 const ROWS: usize = 3;
 const RENDER_COLOR: Color32 = Color32::from_rgb(52, 140, 72);
+pub const DANGER_COLOR: Color32 = Color32::from_rgb(168, 48, 48);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -23,6 +24,7 @@ pub enum Icon {
     NewStack,
     Save,
     Folder,
+    Trash,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +98,25 @@ pub fn bar<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 /// One settings row: adds a label cell and a control cell.
 pub type Row<'a> = Box<dyn FnOnce(&mut Ui) + 'a>;
 
+/// A small square button in red, for actions that delete something.
+pub fn danger_button(ui: &mut Ui, icon: Icon, name: &str, tooltip: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(SMALL), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), name));
+    if ui.is_rect_visible(rect) {
+        let fill = if !ui.is_enabled() {
+            DANGER_COLOR.gamma_multiply(0.4)
+        } else if response.hovered() {
+            Color32::from_rgb(196, 64, 64)
+        } else {
+            DANGER_COLOR
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, 3.0, fill);
+        paint_icon(painter, icon, rect.shrink(4.0), Color32::WHITE, fill);
+    }
+    response.on_hover_text(tooltip)
+}
+
 /// Lays out settings rows top to bottom, starting a new column after three rows. Each
 /// row adds two grid cells (label and control), so the controls line up.
 pub fn rows(ui: &mut Ui, id: &str, rows: Vec<Row<'_>>) {
@@ -149,7 +170,7 @@ fn row_height() -> f32 {
 }
 
 /// Paints `icon` into `r`; `bg` is the button fill, used to hide overlapped strokes.
-fn paint_icon(painter: &egui::Painter, icon: Icon, r: Rect, color: Color32, bg: Color32) {
+pub fn paint_icon(painter: &egui::Painter, icon: Icon, r: Rect, color: Color32, bg: Color32) {
     let s = r.width();
     let p = |x: f32, y: f32| pos2(r.left() + x * s, r.top() + y * s);
     let stroke = Stroke::new((s / 13.0).max(1.4), color);
@@ -192,6 +213,13 @@ fn paint_icon(painter: &egui::Painter, icon: Icon, r: Rect, color: Color32, bg: 
             let outline = vec![p(0.06, 0.2), p(0.38, 0.2), p(0.48, 0.32), p(0.94, 0.32), p(0.94, 0.84), p(0.06, 0.84)];
             painter.add(Shape::closed_line(outline, stroke));
             painter.line_segment([p(0.06, 0.44), p(0.94, 0.44)], stroke);
+        }
+        Icon::Trash => {
+            painter.line_segment([p(0.1, 0.22), p(0.9, 0.22)], stroke);
+            painter.add(Shape::line(vec![p(0.36, 0.22), p(0.4, 0.08), p(0.6, 0.08), p(0.64, 0.22)], stroke));
+            painter.add(Shape::closed_line(vec![p(0.2, 0.3), p(0.8, 0.3), p(0.73, 0.94), p(0.27, 0.94)], stroke));
+            painter.line_segment([p(0.42, 0.42), p(0.43, 0.82)], stroke);
+            painter.line_segment([p(0.58, 0.42), p(0.57, 0.82)], stroke);
         }
         Icon::Save => {
             painter.line_segment([p(0.5, 0.06), p(0.5, 0.62)], stroke);

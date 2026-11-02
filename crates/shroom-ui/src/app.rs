@@ -26,7 +26,7 @@ const WARNING_COLOR: Color32 = Color32::from_rgb(240, 200, 90);
 pub enum Workspace {
     Session,
     Preparation,
-    Processing,
+    /// The result, and while stacking runs, its progress and live images.
     Postprocessing,
 }
 
@@ -166,7 +166,8 @@ impl ShroomApp {
     pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> Self {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         let mut app = Self {
-            workspace: Workspace::Preparation,
+            // Files from the command line go straight to Preparation.
+            workspace: if files.is_empty() { Workspace::Session } else { Workspace::Preparation },
             frames: FrameList::default(),
             selected: None,
             thumbs: HashMap::new(),
@@ -450,22 +451,27 @@ impl ShroomApp {
             size: Vec2::ZERO,
             stage: Stage::Aligning,
         });
-        self.set_workspace(Workspace::Processing);
+        self.set_workspace(Workspace::Postprocessing);
     }
 
     fn save(&mut self) {
         let Some(done) = &self.done else { return };
-        let first = &done.finished.paths[0];
-        let name = format!("{}-stacked.dng", first.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default());
-        let directory = first.parent().map(|d| d.to_path_buf());
-        self.dialogs.save_dng(name, directory);
+        // A free name is suggested; the system's save dialog asks before replacing a file
+        // the user picks.
+        let suggested = crate::batch::result_path(&done.finished.paths[0]);
+        let name = suggested.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.dialogs.save_dng(name, suggested.parent().map(|d| d.to_path_buf()));
     }
 
     fn save_to(&mut self, path: PathBuf) {
         let Some(done) = &self.done else { return };
         let (image, template) = (
             done.retouch.image().clone(),
-            done.finished.template.with_orientation(self.orientation).with_sources(&done.finished.paths),
+            done.finished
+                .template
+                .with_orientation(self.orientation)
+                .with_sources(&done.finished.paths)
+                .with_settings(&done.finished.settings),
         );
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -513,6 +519,11 @@ impl ShroomApp {
     }
 
     #[cfg(test)]
+    pub fn is_processing(&self) -> bool {
+        self.running.is_some()
+    }
+
+    #[cfg(test)]
     pub fn reset_view_for_test(&mut self) {
         self.view = ViewState::default();
     }
@@ -539,6 +550,20 @@ impl ShroomApp {
         self.select(None);
         self.add_files(paths);
         self.set_workspace(Workspace::Preparation);
+    }
+
+    /// Drops files deleted in Manage stacks from Preparation's list.
+    fn forget_files(&mut self, paths: &[PathBuf]) {
+        let selected = self.selected_path().filter(|p| !paths.contains(p));
+        for i in (0..self.frames.frames.len()).rev() {
+            if paths.contains(&self.frames.frames[i].path) {
+                self.frames.remove(i);
+            }
+        }
+        for p in paths {
+            self.thumbs.remove(p);
+        }
+        self.selected = selected.and_then(|p| self.frames.frames.iter().position(|f| f.path == p));
     }
 
     fn discard_result(&mut self) {
@@ -568,7 +593,7 @@ impl eframe::App for ShroomApp {
             }
         }
         // Rotation shortcuts as in Lightroom.
-        if self.workspace != Workspace::Processing && self.confirm.is_none() && !ctx.egui_wants_keyboard_input() {
+        if self.running.is_none() && self.confirm.is_none() && !ctx.egui_wants_keyboard_input() {
             let (left, right) = ctx.input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::COMMAND, egui::Key::OpenBracket),
@@ -603,16 +628,14 @@ impl ShroomApp {
             ui.heading("Shroom Stack");
             ui.separator();
             for (ws, label) in [
-                (Workspace::Session, "Session"),
+                (Workspace::Session, "Manage stacks"),
                 (Workspace::Preparation, "Preparation"),
-                (Workspace::Processing, "Processing"),
                 (Workspace::Postprocessing, "Postprocessing"),
             ] {
                 // Preparation is left only by rendering; Postprocessing needs a result.
                 let enabled = match ws {
                     Workspace::Session | Workspace::Preparation => self.running.is_none(),
-                    Workspace::Processing => self.running.is_some(),
-                    Workspace::Postprocessing => self.done.is_some(),
+                    Workspace::Postprocessing => self.done.is_some() || self.running.is_some(),
                 };
                 ui.add_enabled_ui(enabled, |ui| {
                     if ui.selectable_label(self.workspace == ws, label).clicked() && self.workspace != ws {
@@ -629,7 +652,7 @@ impl ShroomApp {
         match self.workspace {
             Workspace::Session => self.session_toolbar(ui),
             Workspace::Preparation => self.preparation_toolbar(ui),
-            Workspace::Processing => self.processing_toolbar(ui),
+            Workspace::Postprocessing if self.running.is_some() => self.processing_toolbar(ui),
             Workspace::Postprocessing => self.postprocessing_toolbar(ui),
         }
         let status = if self.workspace == Workspace::Session { &self.session.message } else { &self.status };
@@ -768,7 +791,7 @@ impl ShroomApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 render = Self::render_button(ui, "Render", !self.session.is_batch_running())
                     .on_hover_text("Align and stack the frames")
-                    .on_disabled_hover_text("A batch is running in Session.")
+                    .on_disabled_hover_text("A batch is running in Manage stacks.")
                     .clicked();
             });
         });
@@ -1116,7 +1139,7 @@ impl ShroomApp {
             for (i, frame) in self.frames.frames.iter().enumerate() {
                 let selected = match processing {
                     Some(current) => current == i,
-                    None => self.selected == Some(i) && self.workspace != Workspace::Processing,
+                    None => self.selected == Some(i) && self.running.is_none(),
                 };
                 let row = egui::Frame::new()
                     .fill(if selected { ui.visuals().selection.bg_fill } else { Color32::TRANSPARENT })
@@ -1169,7 +1192,7 @@ impl ShroomApp {
                 }
             }
         });
-        if self.workspace == Workspace::Processing {
+        if self.running.is_some() {
             return;
         }
         if let Some(i) = clicked {
@@ -1190,13 +1213,13 @@ impl ShroomApp {
 
     fn preview(&mut self, ui: &mut egui::Ui) {
         match self.workspace {
-            Workspace::Session => {
-                if let Some(Action::OpenStack(paths)) = self.session.show(ui, &self.loader) {
-                    self.open_stack(paths);
-                }
-            }
+            Workspace::Session => match self.session.show(ui, &self.loader) {
+                Some(Action::OpenStack(paths)) => self.open_stack(paths),
+                Some(Action::Deleted(paths)) => self.forget_files(&paths),
+                None => {}
+            },
             Workspace::Preparation => self.preparation_preview(ui),
-            Workspace::Processing => self.processing_preview(ui),
+            Workspace::Postprocessing if self.running.is_some() => self.processing_preview(ui),
             Workspace::Postprocessing => self.postprocessing_preview(ui),
         }
     }

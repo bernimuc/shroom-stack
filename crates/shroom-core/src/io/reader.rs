@@ -73,6 +73,8 @@ pub struct DngTemplate {
     pub(super) xmp: Option<String>,
     /// File names of the frames a result is stacked from, recorded in its XMP.
     pub(super) sources: Vec<String>,
+    /// Stacking settings of a result, recorded in its XMP.
+    pub(super) params: Vec<(&'static str, String)>,
 }
 
 impl std::fmt::Debug for DngTemplate {
@@ -97,6 +99,13 @@ impl DngTemplate {
     pub fn with_orientation(&self, orientation: crate::Orientation) -> Self {
         let mut t = self.clone();
         t.raw.orientation = rawler::Orientation::from_u16(orientation.to_exif());
+        t
+    }
+
+    /// The same template, recording `settings` as how result files were made.
+    pub fn with_settings(&self, settings: &crate::stack::StackSettings) -> Self {
+        let mut t = self.clone();
+        t.params = settings.to_metadata();
         t
     }
 
@@ -156,11 +165,11 @@ pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
         DisplayImage { width: rgb.width() as usize, height: rgb.height() as usize, data: rgb.into_raw() }
     });
     let mosaic = matches!(raw.photometric, RawPhotometricInterpretation::Cfa(_));
-    let sources = if mosaic {
-        Vec::new()
-    } else {
-        xmp_packet(decoder.as_ref()).map(|x| super::xmp::ingredients(&x)).unwrap_or_default()
-    };
+    // Stacking results record how they were made.
+    let xmp = if mosaic { None } else { xmp_packet(decoder.as_ref()) };
+    let sources = xmp.as_deref().map(super::xmp::ingredients).unwrap_or_default();
+    let params = xmp.as_deref().map(super::xmp::params).unwrap_or_default();
+    let settings = crate::stack::StackSettings::from_metadata(|k| params.get(k).cloned());
     Ok(FrameInfo {
         path: path.into(),
         file_name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -175,6 +184,7 @@ pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
         camera_values_known,
         mosaic,
         sources,
+        settings,
         exposure: exposure(&metadata),
     })
 }
@@ -304,7 +314,8 @@ fn decode_full(path: &Path) -> Result<(RawImage, DngTemplate)> {
     // rawler's DNG decoder doesn't implement `xpacket`, so read the XMP tag directly.
     let xmp = xmp_packet(decoder.as_ref()).or_else(|| lens_xmp(&metadata));
     let data = std::mem::replace(&mut raw.data, RawImageData::Integer(Vec::new()));
-    let template = DngTemplate { raw: raw.clone(), metadata, root_tags, raw_tags, xmp, sources: Vec::new() };
+    let template =
+        DngTemplate { raw: raw.clone(), metadata, root_tags, raw_tags, xmp, sources: Vec::new(), params: Vec::new() };
     raw.data = data;
     Ok((raw, template))
 }
@@ -465,6 +476,7 @@ pub(crate) mod tests {
             raw_tags: Vec::new(),
             xmp: None,
             sources: Vec::new(),
+            params: Vec::new(),
         }
     }
 

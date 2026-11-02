@@ -248,6 +248,7 @@ mod tests {
             camera_values_known: true,
             mosaic: true,
             sources: Vec::new(),
+            settings: None,
             exposure: Default::default(),
         }
     }

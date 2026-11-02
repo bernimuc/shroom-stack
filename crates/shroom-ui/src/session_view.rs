@@ -10,11 +10,12 @@ use shroom_core::DisplayImage;
 use shroom_core::Orientation;
 use shroom_core::io::{Exposure, FrameInfo};
 use shroom_core::session::{self, ResultFile, SessionFile, Shot, Stack};
-use shroom_core::stack::{Method, StackSettings};
+use shroom_core::stack::{BokehFrame, Method, StackSettings};
 
 use crate::batch::{Batch, BatchEvent};
 use crate::loader::{FullImage, FullRequest, Loader};
 use crate::processing::overall_progress;
+use crate::toolbar::Icon;
 use crate::viewer::{self, Pane, TiledImage, ViewState};
 
 /// Smallest longer side of the thumbnail textures, in pixels: sharp up to the largest
@@ -38,6 +39,8 @@ const THUMB_GAP: f32 = 4.0;
 pub enum Action {
     /// Load these frames into Preparation.
     OpenStack(Vec<PathBuf>),
+    /// These files were moved to the trash.
+    Deleted(Vec<PathBuf>),
 }
 
 /// A photo of the session.
@@ -53,6 +56,8 @@ struct ResultPhoto {
     file_name: String,
     orientation: Orientation,
     size: Vec2,
+    /// How it was made, if recorded in the file.
+    settings: Option<StackSettings>,
     thumb: Option<TextureHandle>,
 }
 
@@ -84,7 +89,10 @@ enum Edit {
     MergeWithPrevious(usize),
     MoveToPrevious(usize, usize),
     MoveToNext(usize, usize),
-    ToggleExcluded(usize, usize),
+    SetExcluded(usize, usize, bool),
+    /// Moves the selected photos into a stack, or a new stack if `None`.
+    MoveSelected(Option<usize>),
+    SetSelectedExcluded(bool),
     KeepBoundary(usize),
 }
 
@@ -112,7 +120,12 @@ pub struct SessionView {
     stacks: Vec<Stack>,
     checked: Vec<bool>,
     status: HashMap<usize, Status>,
-    selected: Option<PathBuf>,
+    /// Selected photos and results.
+    selected: HashSet<PathBuf>,
+    /// Where a Shift-click range starts.
+    anchor: Option<PathBuf>,
+    /// Files to move to the trash once the user confirms.
+    confirm_delete: Option<Vec<PathBuf>>,
     batch: Option<RunningBatch>,
     preview: Option<Preview>,
     /// Thumbnail height above [`THUMB_HEIGHT_MIN`], in points (so the default is the
@@ -175,7 +188,7 @@ impl SessionView {
     }
 
     /// Shows `path` (a photo or result of this session) on its own.
-    fn open_preview(&mut self, path: &Path, loader: &Loader) {
+    fn open_preview(&mut self, path: &Path, view: ViewState, loader: &Loader) {
         let (file_name, size, orientation) = if let Some(p) = self.photos.get(path) {
             let (w, h) = p.shot.size;
             (p.file_name.clone(), Vec2::new(w as f32, h as f32), p.shot.orientation)
@@ -192,7 +205,7 @@ impl SessionView {
             quick: None,
             full: None,
             error: None,
-            view: ViewState::default(),
+            view,
         });
         // The embedded preview comes with the file information, which is quick to read.
         loader.request_info(path.to_path_buf());
@@ -239,6 +252,7 @@ impl SessionView {
         let result_photo = |info: FrameInfo| ResultPhoto {
             thumb: thumb(&info),
             size: Vec2::new(info.width as f32, info.height as f32),
+            settings: info.settings,
             file_name: info.file_name,
             orientation: info.orientation,
             file: ResultFile { path: info.path, sources: info.sources },
@@ -437,11 +451,30 @@ impl SessionView {
             return None;
         }
         if self.preview.is_some() {
-            self.show_preview(ui);
+            self.show_preview(ui, loader);
             return None;
         }
         let (mut edit, mut action, mut open) = (None, None, None);
         let editable = self.batch.is_none();
+        // Delete (or Backspace) moves the selected files to the trash, after asking.
+        let keys = editable && self.confirm_delete.is_none() && !ui.ctx().egui_wants_keyboard_input();
+        if keys
+            && !self.selected.is_empty()
+            && ui.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                    | i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+            })
+        {
+            self.confirm_delete = Some(self.selected_files());
+        }
+        // Esc clears the selection, unless it closes a menu or the question.
+        if self.confirm_delete.is_none()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && !ui.ctx().egui_wants_keyboard_input()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.selected.clear();
+        }
         egui::Panel::bottom("session_list_bar").show(ui, |ui| self.list_bar(ui));
         // Room on both sides for the results' background, and on the right for the scroll bar.
         let scroll_bar = ui.spacing().scroll.bar_width;
@@ -461,9 +494,93 @@ impl SessionView {
             self.apply(edit);
         }
         if let Some(path) = open {
-            self.open_preview(&path, loader);
+            self.open_preview(&path, ViewState::default(), loader);
+        }
+        if let Some(deleted) = self.confirm_delete_dialog(ui.ctx()) {
+            action = Some(Action::Deleted(deleted));
         }
         action
+    }
+
+    /// Asks before moving files to the trash; returns the files once moved.
+    fn confirm_delete_dialog(&mut self, ctx: &egui::Context) -> Option<Vec<PathBuf>> {
+        let paths = self.confirm_delete.clone()?;
+        let results = paths.iter().filter(|p| self.results.contains_key(*p)).count();
+        let photos = paths.len() - results;
+        let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+        let what = match (photos, results) {
+            (_, 0) => count(photos, "photo"),
+            (0, _) => count(results, "stacking result"),
+            _ => format!("{} and {}", count(photos, "photo"), count(results, "stacking result")),
+        };
+        let mut answer = None;
+        let modal = egui::Modal::new(egui::Id::unique("confirm-delete")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading("Move to Trash?");
+            ui.label(format!("{what} will be moved to the Trash. You can restore them from there."));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let trash = egui::Button::new(RichText::new("Move to Trash").color(Color32::WHITE))
+                    .fill(crate::toolbar::DANGER_COLOR);
+                if ui.add(trash).clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if modal.should_close() && answer.is_none() {
+            answer = Some(false);
+        }
+        match answer? {
+            false => {
+                self.confirm_delete = None;
+                None
+            }
+            true => {
+                self.confirm_delete = None;
+                match move_to_trash(&paths) {
+                    Ok(()) => {
+                        self.forget(&paths);
+                        self.message = Some((false, format!("Moved {what} to the Trash.")));
+                        Some(paths)
+                    }
+                    Err(e) => {
+                        self.message = Some((true, format!("Could not move to the Trash: {e}")));
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    /// Removes deleted files from the stacks; stacks without photos left are removed.
+    fn forget(&mut self, paths: &[PathBuf]) {
+        for s in &mut self.stacks {
+            s.frames.retain(|p| !paths.contains(p));
+            s.results.retain(|p| !paths.contains(p));
+            for p in paths {
+                s.excluded.remove(p);
+            }
+        }
+        self.stacks.retain(|s| !s.frames.is_empty());
+        for p in paths {
+            self.photos.remove(p);
+            self.results.remove(p);
+            self.selected.remove(p);
+        }
+        if self.preview.as_ref().is_some_and(|p| paths.contains(&p.path)) {
+            self.preview = None;
+        }
+        self.checked = vec![false; self.stacks.len()];
+        self.status.clear();
+        self.save();
+    }
+
+    /// The selected photos and results, in list order.
+    fn selected_files(&self) -> Vec<PathBuf> {
+        self.preview_order().into_iter().filter(|p| self.selected.contains(p)).collect()
     }
 
     /// Controls below the stack list.
@@ -490,16 +607,38 @@ impl SessionView {
 
     /// The previewed file filling the workspace; Esc or the button in its corner goes
     /// back to the stack list.
-    fn show_preview(&mut self, ui: &mut egui::Ui) {
-        let Some(preview) = &mut self.preview else { return };
+    fn show_preview(&mut self, ui: &mut egui::Ui, loader: &Loader) {
+        let Some(preview) = &self.preview else { return };
+        let path = preview.path.clone();
         // In full screen, Esc belongs to the view (it leaves full screen first).
-        let mut back = preview.view.fullscreen.is_none()
-            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-        let label = match (&preview.error, preview.full.is_some()) {
+        let fullscreen = preview.view.fullscreen.is_some();
+        let keys = !ui.ctx().egui_wants_keyboard_input();
+        let (mut back, step, include) = ui.input_mut(|i| {
+            let mut key = |k| keys && i.consume_key(egui::Modifiers::NONE, k);
+            let back = !fullscreen && key(egui::Key::Escape);
+            let step = key(egui::Key::ArrowRight) as i32 - key(egui::Key::ArrowLeft) as i32;
+            let include = match (key(egui::Key::P), key(egui::Key::X)) {
+                (true, false) => Some(true),
+                (false, true) => Some(false),
+                _ => None,
+            };
+            (back, step, include)
+        });
+        let frame = self.frame_position(&path);
+        if let (Some(include), Some((i, j)), true) = (include, frame, self.batch.is_none()) {
+            self.apply(Edit::SetExcluded(i, j, !include));
+        }
+        let excluded = frame.is_some_and(|(i, _)| self.stacks[i].excluded.contains(&path));
+
+        let Some(preview) = &mut self.preview else { return };
+        let mut label = match (&preview.error, preview.full.is_some()) {
             (Some(e), _) => format!("{} (full resolution failed: {e})", preview.file_name),
             (None, false) => format!("{} (loading full resolution…)", preview.file_name),
             (None, true) => preview.file_name.clone(),
         };
+        if excluded {
+            label += " · excluded from stacking";
+        }
         let image = preview.full.as_ref().or(preview.quick.as_ref()).map(|t| (t, preview.size));
         let placeholder = if preview.error.is_some() { "No preview" } else { "Loading…" };
         let pane = Pane { label: &label, image, placeholder, overlay: None };
@@ -510,11 +649,40 @@ impl SessionView {
         let corner = egui::Rect::from_min_size(egui::pos2(area.max.x - size.x - 8.0, area.min.y + 8.0), size);
         back |= ui
             .put(corner, egui::Button::new("Back to stacks").fill(Color32::from_black_alpha(170)))
-            .on_hover_text("Back to the stack list (Esc)")
+            .on_hover_text("Back to the stack list (Esc)\n← →: previous / next file\nP / X: include / exclude")
             .clicked();
         if back {
             self.preview = None;
+        } else if step != 0 {
+            let view = preview.view;
+            let order = self.preview_order();
+            let next = order
+                .iter()
+                .position(|p| *p == path)
+                .and_then(|k| k.checked_add_signed(step as isize))
+                .and_then(|k| order.get(k));
+            if let Some(next) = next {
+                // Same zoom and position, to compare a detail across files.
+                self.open_preview(&next.clone(), view, loader);
+            }
         }
+    }
+
+    /// Stack and frame index of an input photo.
+    fn frame_position(&self, path: &Path) -> Option<(usize, usize)> {
+        self.stacks.iter().enumerate().find_map(|(i, s)| s.frames.iter().position(|p| p == path).map(|j| (i, j)))
+    }
+
+    /// The files the preview steps through: each stack's photos, then its results.
+    fn preview_order(&self) -> Vec<PathBuf> {
+        self.stacks
+            .iter()
+            .flat_map(|s| {
+                let photos = s.frames.iter().filter(|p| self.photos.contains_key(*p));
+                photos.chain(s.results.iter().filter(|p| self.results.contains_key(*p)))
+            })
+            .cloned()
+            .collect()
     }
 
     fn stack_header(
@@ -572,6 +740,17 @@ impl SessionView {
                     if i > 0 && ui.button("Merge with previous").clicked() {
                         *edit = Some(Edit::MergeWithPrevious(i));
                     }
+                    let name = format!("Delete stack {}", i + 1);
+                    if crate::toolbar::danger_button(
+                        ui,
+                        Icon::Trash,
+                        &name,
+                        "Move all photos and results of this stack to the Trash",
+                    )
+                    .clicked()
+                    {
+                        self.confirm_delete = Some(stack.frames.iter().chain(&stack.results).cloned().collect());
+                    }
                 });
             });
         });
@@ -588,8 +767,8 @@ impl SessionView {
         }
         let excluded = stack.excluded.len();
         parts.push(match excluded {
-            0 => format!("{} photos", stack.frames.len()),
-            n => format!("{} photos, {n} excluded", stack.frames.len()),
+            0 => photo_count(stack.frames.len()),
+            n => format!("{}, {n} excluded", photo_count(stack.frames.len())),
         });
         if let Some(s) = shots.first() {
             parts.push(exposure_text(&s.exposure));
@@ -634,13 +813,8 @@ impl SessionView {
                 };
                 let name = photo.file_name.clone();
                 response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, editable, &name));
-                if self.selected.as_ref() == Some(path) {
-                    ui.painter().rect_stroke(
-                        response.rect.expand(1.5),
-                        2.0,
-                        egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-                        egui::StrokeKind::Outside,
-                    );
+                if self.selected.contains(path) {
+                    paint_selection(ui, response.rect);
                 }
                 if excluded {
                     let r = response.rect;
@@ -656,14 +830,44 @@ impl SessionView {
                 }
                 let response = response.on_hover_text(hover);
                 if response.clicked() {
-                    self.selected = Some(path.clone());
+                    let modifiers = ui.input(|i| i.modifiers);
+                    self.click(path, modifiers);
                 }
                 if response.double_clicked() {
                     *open = Some(path.clone());
                 }
                 if editable {
                     response.context_menu(|ui| {
-                        self.selected = Some(path.clone());
+                        if !self.selected.contains(path) {
+                            self.selected = HashSet::from([path.clone()]);
+                            self.anchor = Some(path.clone());
+                        }
+                        let photos = self.selected_photos().len();
+                        if photos > 1 {
+                            ui.menu_button(format!("Move {photos} photos to"), |ui| {
+                                for k in 0..=last_stack {
+                                    if ui.button(format!("Stack {}", k + 1)).clicked() {
+                                        *edit = Some(Edit::MoveSelected(Some(k)));
+                                    }
+                                }
+                                ui.separator();
+                                if ui.button("New stack").clicked() {
+                                    *edit = Some(Edit::MoveSelected(None));
+                                }
+                            });
+                            ui.separator();
+                            if ui.button(format!("Exclude {photos} photos from stacking")).clicked() {
+                                *edit = Some(Edit::SetSelectedExcluded(true));
+                            }
+                            if ui.button(format!("Include {photos} photos in stacking")).clicked() {
+                                *edit = Some(Edit::SetSelectedExcluded(false));
+                            }
+                            ui.separator();
+                            if ui.button(format!("Move {} files to Trash…", self.selected.len())).clicked() {
+                                self.confirm_delete = Some(self.selected_files());
+                            }
+                            return;
+                        }
                         if ui.add_enabled(j > 0, egui::Button::new("Start new stack here")).clicked() {
                             *edit = Some(Edit::Split(i, j));
                         }
@@ -684,7 +888,11 @@ impl SessionView {
                         ui.separator();
                         let label = if excluded { "Include in stacking" } else { "Exclude from stacking" };
                         if ui.button(label).clicked() {
-                            *edit = Some(Edit::ToggleExcluded(i, j));
+                            *edit = Some(Edit::SetExcluded(i, j, !excluded));
+                        }
+                        ui.separator();
+                        if ui.button("Move to Trash…").clicked() {
+                            self.confirm_delete = Some(self.selected_files());
                         }
                     });
                 }
@@ -699,8 +907,11 @@ impl SessionView {
 
     /// The stack's results in a row of their own (wrapping like the photos), on a green
     /// background reaching a little beyond them, so they line up with the photos above.
-    fn result_thumbnails(&self, ui: &mut egui::Ui, stack: &Stack, open: &mut Option<PathBuf>) {
+    fn result_thumbnails(&mut self, ui: &mut egui::Ui, stack: &Stack, open: &mut Option<PathBuf>) {
         let thumb_height = self.thumb_height();
+        let editable = self.batch.is_none();
+        let mut clicked = None;
+        let mut trash = None;
         let painter = ui.painter().clone();
         let background = painter.add(egui::Shape::Noop);
         let row = ui.horizontal_wrapped(|ui| {
@@ -723,18 +934,114 @@ impl SessionView {
                         ui.add(egui::Label::new(RichText::new(&name).small()).sense(Sense::click()).selectable(false))
                     }
                 };
+                let settings = photo.and_then(|p| p.settings);
+                if let Some(s) = &settings {
+                    paint_method_badge(ui.painter(), response.rect, s.method);
+                }
+                if self.selected.contains(path) {
+                    paint_selection(ui, response.rect);
+                }
+                if response.clicked() {
+                    clicked = Some((path.clone(), ui.input(|i| i.modifiers)));
+                }
                 response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, &name));
-                if response.on_hover_text(format!("{name}\nStacking result")).double_clicked() {
+                let details = settings.as_ref().map(settings_text).unwrap_or_else(|| "Settings not recorded".into());
+                let response = response.on_hover_text(format!("{name}\nStacking result\n{details}"));
+                if response.double_clicked() {
                     *open = Some(path.clone());
+                }
+                if editable {
+                    response.context_menu(|ui| {
+                        if ui.button("Move to Trash…").clicked() {
+                            trash = Some(path.clone());
+                        }
+                    });
                 }
             }
         });
         let mut rect = row.response.rect;
         rect.max.x = ui.max_rect().max.x;
         painter.set(background, egui::Shape::rect_filled(rect.expand(RESULT_MARGIN), 4.0, RESULT_FILL));
+        if let Some((path, modifiers)) = clicked {
+            self.click(&path, modifiers);
+        }
+        if let Some(path) = trash {
+            if !self.selected.contains(&path) {
+                self.selected = HashSet::from([path.clone()]);
+                self.anchor = Some(path);
+            }
+            self.confirm_delete = Some(self.selected_files());
+        }
+    }
+
+    /// Selects on a click: only this file; with Cmd/Ctrl adds or removes it; with Shift
+    /// selects the files from the last clicked one to this, in list order.
+    fn click(&mut self, path: &Path, modifiers: egui::Modifiers) {
+        if modifiers.shift
+            && let Some(anchor) = &self.anchor
+        {
+            let order = self.preview_order();
+            let (a, b) = (order.iter().position(|p| p == anchor), order.iter().position(|p| p == path));
+            if let (Some(a), Some(b)) = (a, b) {
+                self.selected.extend(order[a.min(b)..=a.max(b)].iter().cloned());
+                return;
+            }
+        }
+        if modifiers.command {
+            if !self.selected.remove(path) {
+                self.selected.insert(path.to_path_buf());
+            }
+        } else {
+            self.selected = HashSet::from([path.to_path_buf()]);
+        }
+        self.anchor = Some(path.to_path_buf());
+    }
+
+    /// The selected input photos, in list order.
+    fn selected_photos(&self) -> Vec<PathBuf> {
+        self.stacks.iter().flat_map(|s| &s.frames).filter(|p| self.selected.contains(*p)).cloned().collect()
+    }
+
+    #[cfg(test)]
+    pub fn selected_for_test(&self) -> Vec<PathBuf> {
+        self.preview_order().into_iter().filter(|p| self.selected.contains(p)).collect()
+    }
+
+    #[cfg(test)]
+    pub fn move_selected_for_test(&mut self, to: Option<usize>) {
+        self.apply(Edit::MoveSelected(to));
     }
 
     fn apply(&mut self, edit: Edit) {
+        match edit {
+            Edit::MoveSelected(to) => {
+                let photos = self.selected_photos();
+                session::move_frames(&mut self.stacks, &photos, to);
+                // Stacks may have been added, removed or reordered.
+                self.checked = vec![false; self.stacks.len()];
+                self.status.clear();
+                self.save();
+                return;
+            }
+            Edit::SetSelectedExcluded(excluded) => {
+                let photos = self.selected_photos();
+                for s in &mut self.stacks {
+                    for p in s.frames.iter().filter(|p| photos.contains(p)) {
+                        if excluded {
+                            s.excluded.insert(p.clone());
+                        } else {
+                            s.excluded.remove(p);
+                        }
+                    }
+                }
+                for (i, c) in self.checked.iter_mut().enumerate() {
+                    *c &= self.stacks[i].included().len() >= 2;
+                }
+                self.save();
+                return;
+            }
+            _ => {}
+        }
         let stacks = &mut self.stacks;
         // Keep the batch selection with its stacks: count how the edit shifts them.
         let before = stacks.len();
@@ -755,11 +1062,13 @@ impl SessionView {
                 session::move_to_next(stacks, i, j);
                 i + 1
             }
-            Edit::ToggleExcluded(i, j) => {
+            Edit::SetExcluded(i, j, excluded) => {
                 let s = &mut stacks[i];
                 let path = s.frames[j].clone();
-                if !s.excluded.remove(&path) {
+                if excluded {
                     s.excluded.insert(path);
+                } else {
+                    s.excluded.remove(&path);
                 }
                 i
             }
@@ -767,6 +1076,7 @@ impl SessionView {
                 stacks[i].boundary = 1.0;
                 i
             }
+            Edit::MoveSelected(_) | Edit::SetSelectedExcluded(_) => unreachable!("handled above"),
         };
         match stacks.len().cmp(&before) {
             std::cmp::Ordering::Greater => self.checked.insert(at, false),
@@ -791,6 +1101,53 @@ impl SessionView {
     pub fn check_all_for_test(&mut self) {
         self.checked.iter_mut().for_each(|c| *c = true);
     }
+}
+
+fn photo_count(n: usize) -> String {
+    if n == 1 { "1 photo".into() } else { format!("{n} photos") }
+}
+
+/// Moves files to the system trash (in tests: deletes the temporary test files).
+fn move_to_trash(paths: &[PathBuf]) -> Result<(), String> {
+    #[cfg(not(test))]
+    return trash::delete_all(paths).map_err(|e| e.to_string());
+    #[cfg(test)]
+    paths.iter().try_for_each(std::fs::remove_file).map_err(|e| e.to_string())
+}
+
+/// The outline marking a selected thumbnail.
+fn paint_selection(ui: &egui::Ui, rect: egui::Rect) {
+    let stroke = egui::Stroke::new(2.0, ui.visuals().selection.stroke.color);
+    ui.painter().rect_stroke(rect.expand(1.5), 2.0, stroke, egui::StrokeKind::Outside);
+}
+
+/// The stacking method as a small icon in the top left corner of a result thumbnail.
+fn paint_method_badge(painter: &egui::Painter, thumb: egui::Rect, method: Method) {
+    let badge = egui::Rect::from_min_size(thumb.min + Vec2::splat(4.0), Vec2::splat(20.0));
+    let fill = Color32::from_gray(28);
+    painter.rect_filled(badge, 4.0, fill);
+    let icon = match method {
+        Method::DepthMap { .. } => crate::toolbar::Icon::DepthMap,
+        Method::Pyramid { .. } => crate::toolbar::Icon::Pyramid,
+    };
+    crate::toolbar::paint_icon(painter, icon, badge.shrink(3.0), Color32::from_gray(230), fill);
+}
+
+/// The settings of a result, one aspect per line.
+fn settings_text(s: &StackSettings) -> String {
+    let mut lines = vec![match s.method {
+        Method::DepthMap { radius, smoothing } => format!("Depth map: radius {radius}, smoothing {smoothing}"),
+        Method::Pyramid { smoothing } => format!("Pyramid: smoothing {smoothing}"),
+    }];
+    lines.push(if s.align { "Frames aligned" } else { "Frames not aligned" }.into());
+    if let Some(b) = s.bokeh {
+        let frame = match b.frame {
+            BokehFrame::MostBlurred => "most blurred frame",
+            BokehFrame::NearestFocus => "nearest focus",
+        };
+        lines.push(format!("Soft bokeh: {frame}, threshold {}", b.threshold));
+    }
+    lines.join("\n")
 }
 
 fn exposure_text(e: &Exposure) -> String {

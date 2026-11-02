@@ -258,6 +258,51 @@ impl StackSettings {
     pub fn new(method: Method) -> Self {
         Self { method, align: true, use_gpu: true, bokeh: None }
     }
+
+    /// The settings as named values for a result file's metadata (`use_gpu` is left out;
+    /// it doesn't change the result).
+    pub fn to_metadata(&self) -> Vec<(&'static str, String)> {
+        let mut values = match self.method {
+            Method::DepthMap { radius, smoothing } => vec![
+                ("Method", "DepthMap".to_string()),
+                ("Radius", radius.to_string()),
+                ("Smoothing", smoothing.to_string()),
+            ],
+            Method::Pyramid { smoothing } => {
+                vec![("Method", "Pyramid".to_string()), ("Smoothing", smoothing.to_string())]
+            }
+        };
+        values.push(("Align", if self.align { "True" } else { "False" }.to_string()));
+        if let Some(b) = self.bokeh {
+            let frame = match b.frame {
+                BokehFrame::MostBlurred => "MostBlurred",
+                BokehFrame::NearestFocus => "NearestFocus",
+            };
+            values.push(("SoftBokeh", frame.to_string()));
+            values.push(("BokehThreshold", b.threshold.to_string()));
+        }
+        values
+    }
+
+    /// Reads settings written by [`Self::to_metadata`]; `None` without a known method.
+    pub fn from_metadata(get: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        let number = |key: &str| get(key).and_then(|v| v.parse::<u32>().ok());
+        let method = match get("Method")?.as_str() {
+            "DepthMap" => Method::DepthMap { radius: number("Radius")?, smoothing: number("Smoothing")? },
+            "Pyramid" => Method::Pyramid { smoothing: number("Smoothing")? },
+            _ => return None,
+        };
+        let frame = match get("SoftBokeh").as_deref() {
+            Some("MostBlurred") => Some(BokehFrame::MostBlurred),
+            Some("NearestFocus") => Some(BokehFrame::NearestFocus),
+            _ => None,
+        };
+        let bokeh = frame.map(|frame| SoftBokeh {
+            frame,
+            threshold: number("BokehThreshold").unwrap_or(SoftBokeh::DEFAULT.threshold),
+        });
+        Some(Self { method, align: get("Align").as_deref() != Some("False"), use_gpu: true, bokeh })
+    }
 }
 
 #[derive(Clone, Debug)]
