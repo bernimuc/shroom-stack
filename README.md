@@ -4,6 +4,12 @@ Focus stacking for macro photography: combines a series of raw frames (DNG, CR3 
 other camera raw formats) with different focal planes into one image that is sharp throughout, and writes it as a Linear DNG
 that stays fully editable in Lightroom.
 
+Raw decoding uses [rawler](https://github.com/dnglab/dnglab). Not readable yet: Nikon NEFs
+in the High Efficiency modes (HE/HE*), whose TicoRAW codec has no open decoder. Manage
+stacks still lists them (from their embedded previews, marked as not stackable) and, if
+the free Adobe DNG Converter is installed (macOS, Windows), converts them to DNG with
+**Convert to DNG**. Otherwise shoot "Lossless compressed" NEFs.
+
 - **Two methods:** *depth map* (each pixel from its sharpest frame, parameters radius and
   smoothing) and *pyramid* (detail combined at every scale, parameter smoothing).
 - **Alignment** compensates shifts and focus breathing (frames growing or shrinking
@@ -50,6 +56,10 @@ On Linux the usual windowing libraries are needed (e.g. on Debian/Ubuntu:[Shroom
    - Double-click a thumbnail to view it on its own: ← → step through the files, P and X
      include or exclude the photo, Esc or "Back to stacks" returns to the list.
    - The slider below the list sets the thumbnail size.
+   - Stacks with photos the app can't decode (Nikon HE/HE* NEFs) are shown dimmed and
+     can't be rendered. **Convert to DNG** runs Adobe DNG Converter on them (found in its
+     standard install location, or set `SHROOM_DNG_CONVERTER` to its path); the DNGs are
+     written next to the originals and listed as a new stack.
    - **Open** loads a stack into Preparation; **Render selected** stacks the checked
      stacks one after another and saves each result next to its originals
      (`<first photo>-stacked.dng`, numbered instead of overwriting).

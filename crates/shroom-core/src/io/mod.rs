@@ -55,6 +55,9 @@ pub struct FrameInfo {
     pub sources: Vec<String>,
     /// For stacking results: the settings they were made with (from XMP).
     pub settings: Option<crate::stack::StackSettings>,
+    /// Why the image data can't be decoded (e.g. Nikon HE* compression); the other fields
+    /// come from the metadata and the embedded preview. Such files can't be stacked.
+    pub unsupported: Option<String>,
     pub exposure: Exposure,
 }
 
@@ -99,6 +102,7 @@ mod tests {
             mosaic: true,
             sources: Vec::new(),
             settings: None,
+            unsupported: None,
             exposure: Default::default(),
         }
     }

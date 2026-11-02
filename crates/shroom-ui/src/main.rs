@@ -3,6 +3,7 @@
 mod app;
 mod batch;
 mod dialogs;
+mod dng_converter;
 mod frames;
 mod loader;
 mod processing;

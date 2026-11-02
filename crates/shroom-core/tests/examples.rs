@@ -41,11 +41,12 @@ fn stacks() -> Vec<PathBuf> {
         eprintln!("examples/ not found, skipping");
         return Vec::new();
     };
-    // Stacks of DNG files; folders with other raw formats (e.g. CR3) are not covered here.
+    // Stacks of DNG files; folders with other raw formats (e.g. CR3, or NEF next to
+    // Helicon's DNG results) are not covered here.
     let mut stacks: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())
-        .filter(|p| p.is_dir() && dngs(p).len() >= 2)
+        .filter(|p| p.is_dir() && dngs(p).iter().filter(|f| !is_helicon(f)).count() >= 2)
         .collect();
     stacks.sort();
     stacks
@@ -214,6 +215,28 @@ fn cr3_matches_lightroom_dng() {
 
 /// All example stacks as one session: grouped back into the original stacks, with
 /// consecutive previews recognised as the same picture. Results are not photos.
+/// Stack 6 was shot as Nikon HE* NEFs, which no open decoder reads: they are listed from
+/// their metadata and embedded preview, decoding says why it fails and what to do, and
+/// Helicon's results from them are readable.
+#[test]
+#[ignore]
+fn nikon_high_efficiency_nef_is_explained() {
+    let Some(dir) = examples_dir().map(|d| d.join("Stack 6")).filter(|d| d.is_dir()) else { return };
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+    files.sort();
+    let nef = files.iter().find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("nef"))).unwrap();
+    let info = io::read_frame_info(nef).unwrap();
+    assert!(info.unsupported.as_deref().is_some_and(|r| r.contains("High Efficiency")), "{:?}", info.unsupported);
+    assert!(info.preview.is_some() && info.capture_time.is_some() && info.exposure.f_number.is_some());
+    assert_eq!(info.camera, "Nikon Z 8");
+    let err = io::load_linear(nef).unwrap_err();
+    assert!(matches!(err, shroom_core::Error::Unsupported { .. }), "{err}");
+    assert!(err.to_string().contains("Adobe DNG Converter"), "{err}");
+    for result in files.iter().filter(|p| is_helicon(p)) {
+        assert!(!io::read_frame_info(result).unwrap().mosaic);
+    }
+}
+
 #[test]
 #[ignore]
 fn example_stacks_are_grouped() {

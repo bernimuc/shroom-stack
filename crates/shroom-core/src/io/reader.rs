@@ -146,24 +146,46 @@ fn open(path: &Path) -> Result<Opened> {
 }
 
 fn decode_err(path: &Path, e: impl std::fmt::Display) -> Error {
-    Error::Decode { path: path.into(), message: e.to_string() }
+    let message = e.to_string();
+    // Nikon's High Efficiency modes use the licensed TicoRAW codec, which no open decoder
+    // reads yet (rawler reports "NEF compression Some(HighEfficency…) is not supported").
+    if message.contains("HighEfficency") {
+        return Error::Unsupported { path: path.into(), message: NIKON_HE_MESSAGE.into() };
+    }
+    Error::Decode { path: path.into(), message }
 }
+
+const NIKON_HE_MESSAGE: &str = "Nikon High Efficiency (HE/HE*) NEFs can't be read yet. Convert them with \
+                                Adobe DNG Converter, or shoot NEF with \"Lossless compressed\".";
 
 pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
     let Opened { source, decoder } = open(path)?;
     let params = RawDecodeParams::default();
     let metadata = decoder.raw_metadata(&source, &params).map_err(|e| decode_err(path, e))?;
-    // A dummy decode parses the image layout without decompressing pixel data.
-    let raw = decoder.raw_image(&source, &params, true).map_err(|e| decode_err(path, e))?;
-    let (width, height) = raw.active_area.map(|a| (a.d.w, a.d.h)).unwrap_or((raw.width, raw.height));
-    let camera_values_known = camera_values(decoder.as_ref(), &raw).1;
+    // Embedded preview, and the size it was stored in.
+    let mut preview_size = None;
     let preview = decoder.preview_image(&source, &params).ok().flatten().map(|img| {
+        preview_size = Some((img.width() as usize, img.height() as usize));
         // Some formats embed full-size previews (CR3: 8192 px); thumbnails don't need that.
         let img =
             if img.width().max(img.height()) > MAX_PREVIEW { img.thumbnail(MAX_PREVIEW, MAX_PREVIEW) } else { img };
         let rgb = img.to_rgb8();
         DisplayImage { width: rgb.width() as usize, height: rgb.height() as usize, data: rgb.into_raw() }
     });
+    // A dummy decode parses the image layout without decompressing pixel data.
+    let raw = match decoder.raw_image(&source, &params, true) {
+        Ok(raw) => raw,
+        Err(e) => match decode_err(path, e) {
+            // Unreadable image data (e.g. Nikon HE*): the file is still listed, with its
+            // metadata and preview.
+            Error::Unsupported { message, .. } => {
+                return Ok(unsupported_info(path, &metadata, preview, preview_size, message));
+            }
+            err => return Err(err),
+        },
+    };
+    let (width, height) = raw.active_area.map(|a| (a.d.w, a.d.h)).unwrap_or((raw.width, raw.height));
+    let camera_values_known = camera_values(decoder.as_ref(), &raw).1;
     let mosaic = matches!(raw.photometric, RawPhotometricInterpretation::Cfa(_));
     // Stacking results record how they were made.
     let xmp = if mosaic { None } else { xmp_packet(decoder.as_ref()) };
@@ -186,7 +208,38 @@ pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
         sources,
         settings,
         exposure: exposure(&metadata),
+        unsupported: None,
     })
+}
+
+/// File information for a raw file whose image data can't be decoded. The size is the
+/// embedded preview's (usually full size), as the raw image layout is unknown.
+fn unsupported_info(
+    path: &Path,
+    metadata: &RawMetadata,
+    preview: Option<DisplayImage>,
+    preview_size: Option<(usize, usize)>,
+    reason: String,
+) -> FrameInfo {
+    let (width, height) = preview_size.unwrap_or_default();
+    FrameInfo {
+        path: path.into(),
+        file_name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        file_modified: std::fs::metadata(path).and_then(|m| m.modified()).ok(),
+        capture_time: capture_time(metadata),
+        camera: format!("{} {}", metadata.make, metadata.model).trim().to_string(),
+        width,
+        height,
+        preview,
+        color: ColorInfo::default(),
+        orientation: crate::Orientation::from_exif(metadata.exif.orientation.unwrap_or(1)),
+        camera_values_known: false,
+        mosaic: true,
+        sources: Vec::new(),
+        settings: None,
+        exposure: exposure(metadata),
+        unsupported: Some(reason),
+    }
 }
 
 fn exposure(metadata: &RawMetadata) -> super::Exposure {
@@ -442,6 +495,15 @@ fn color_info(raw: &RawImage) -> ColorInfo {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn nikon_high_efficiency_is_explained() {
+        let path = std::path::Path::new("a.NEF");
+        let err = super::decode_err(path, "NEF compression Some(HighEfficencyStar) is not supported");
+        assert!(matches!(err, super::Error::Unsupported { .. }), "{err}");
+        assert!(err.to_string().contains("Adobe DNG Converter"), "{err}");
+        assert!(matches!(super::decode_err(path, "corrupt"), super::Error::Decode { .. }));
+    }
+
     use super::*;
     use rawler::decoders::Camera;
     use rawler::pixarray::PixU16;

@@ -13,6 +13,7 @@ use shroom_core::session::{self, ResultFile, SessionFile, Shot, Stack};
 use shroom_core::stack::{BokehFrame, Method, StackSettings};
 
 use crate::batch::{Batch, BatchEvent};
+use crate::dng_converter::{self, Conversion};
 use crate::loader::{FullImage, FullRequest, Loader};
 use crate::processing::overall_progress;
 use crate::toolbar::Icon;
@@ -48,6 +49,8 @@ struct Photo {
     shot: Shot,
     file_name: String,
     thumb: Option<TextureHandle>,
+    /// Why the image data can't be decoded (listed from its embedded preview).
+    unsupported: Option<String>,
 }
 
 /// A stacking result in the folder.
@@ -96,6 +99,15 @@ enum Edit {
     KeepBoundary(usize),
 }
 
+/// A conversion to DNG of the photos of a stack.
+struct RunningConversion {
+    conversion: Conversion,
+    /// The first converted photo, identifying the stack (indices change with edits).
+    source: PathBuf,
+    /// Files converted so far, of all.
+    progress: (usize, usize),
+}
+
 struct RunningBatch {
     batch: Batch,
     /// Stack index of each batch item.
@@ -117,6 +129,8 @@ pub struct SessionView {
     /// Results saved during this session whose information is still being read.
     pending_results: HashSet<PathBuf>,
     unreadable: usize,
+    /// Why the first unreadable file could not be read.
+    unreadable_reason: Option<String>,
     stacks: Vec<Stack>,
     checked: Vec<bool>,
     status: HashMap<usize, Status>,
@@ -128,6 +142,9 @@ pub struct SessionView {
     confirm_delete: Option<Vec<PathBuf>>,
     batch: Option<RunningBatch>,
     preview: Option<Preview>,
+    conversion: Option<RunningConversion>,
+    /// DNGs from a finished conversion whose information is still being read.
+    pending_converted: HashSet<PathBuf>,
     /// Thumbnail height above [`THUMB_HEIGHT_MIN`], in points (so the default is the
     /// smallest size).
     thumb_extra: f32,
@@ -138,7 +155,7 @@ pub struct SessionView {
 impl SessionView {
     /// Starts reading the raw files of `folder`; grouping follows once all are read.
     pub fn open(&mut self, folder: PathBuf, loader: &Loader) {
-        if self.batch.is_some() {
+        if self.batch.is_some() || self.conversion.is_some() {
             return;
         }
         let (files, _) = crate::frames::collect_raw_files([folder.clone()]);
@@ -168,6 +185,7 @@ impl SessionView {
     pub fn wants(&self, path: &Path) -> bool {
         self.pending.contains(path)
             || self.pending_results.contains(path)
+            || self.pending_converted.contains(path)
             || self.preview.as_ref().is_some_and(|p| p.path == path && p.quick.is_none())
     }
 
@@ -257,6 +275,22 @@ impl SessionView {
             orientation: info.orientation,
             file: ResultFile { path: info.path, sources: info.sources },
         };
+        let photo = |info: &FrameInfo| Photo {
+            shot: Shot::from_info(info),
+            file_name: info.file_name.clone(),
+            thumb: thumb(info),
+            unsupported: info.unsupported.clone(),
+        };
+        if self.pending_converted.remove(path) {
+            // Already in the stack created for the conversion.
+            match result {
+                Ok(info) => {
+                    self.photos.insert(path.to_path_buf(), photo(&info));
+                }
+                Err(e) => self.message = Some((true, e)),
+            }
+            return;
+        }
         if let Some(preview) = self.preview.as_mut().filter(|p| p.path == path && p.quick.is_none())
             && !self.pending.contains(path)
             && !self.pending_results.contains(path)
@@ -281,11 +315,14 @@ impl SessionView {
                 self.results.insert(path.to_path_buf(), result_photo(info));
             }
             Ok(info) => {
-                let thumb = thumb(&info);
-                let photo = Photo { shot: Shot::from_info(&info), file_name: info.file_name.clone(), thumb };
-                self.photos.insert(path.to_path_buf(), photo);
+                self.photos.insert(path.to_path_buf(), photo(&info));
             }
-            Err(_) => self.unreadable += 1,
+            Err(e) => {
+                self.unreadable += 1;
+                // The error names the file; keep only the reason.
+                let reason = e.split_once(&format!("{}: ", path.display())).map_or(e.as_str(), |(_, r)| r);
+                self.unreadable_reason.get_or_insert_with(|| reason.to_string());
+            }
         }
         if self.pending.is_empty() {
             self.group();
@@ -302,7 +339,9 @@ impl SessionView {
         let unmatched = session::attach_results(&mut self.stacks, &results).len();
         self.checked = vec![false; self.stacks.len()];
         let uncertain = self.stacks.iter().filter(|s| s.is_uncertain()).count();
-        let mut text = format!("{} photos in {} stacks", shots.len(), self.stacks.len());
+        let stacks =
+            if self.stacks.len() == 1 { "1 stack".to_string() } else { format!("{} stacks", self.stacks.len()) };
+        let mut text = format!("{} in {stacks}", photo_count(shots.len()));
         if uncertain > 0 {
             text += &format!(", {uncertain} to check");
         }
@@ -310,8 +349,17 @@ impl SessionView {
             let plural = if unmatched == 1 { "" } else { "s" };
             text += &format!(" ({unmatched} other stacking result{plural})");
         }
+        let unsupported: Vec<&str> = self.photos.values().filter_map(|p| p.unsupported.as_deref()).collect();
+        if let Some(reason) = unsupported.first() {
+            // The first sentence; the thumbnails' tooltips have the whole reason.
+            let short = reason.split_once(". ").map_or(*reason, |(s, _)| s);
+            text += &format!(", {} can't be stacked: {short}", unsupported.len());
+        }
         if self.unreadable > 0 {
             text += &format!(", {} files could not be read", self.unreadable);
+            if let Some(reason) = &self.unreadable_reason {
+                text += &format!(": {reason}");
+            }
         }
         if self.message.is_none() {
             self.message = Some((false, text));
@@ -357,14 +405,127 @@ impl SessionView {
         loader.request_infos(vec![path]);
     }
 
+    /// Converts the stack's photos that can't be decoded to DNGs with Adobe DNG Converter;
+    /// the DNGs become a new stack after it.
+    fn start_conversion(&mut self, ctx: &egui::Context, i: usize) {
+        let Some(converter) = dng_converter::find() else { return };
+        let files: Vec<PathBuf> = self.stacks[i]
+            .included()
+            .into_iter()
+            .filter(|p| self.photos.get(p).is_some_and(|p| p.unsupported.is_some()))
+            .collect();
+        if files.is_empty() || self.conversion.is_some() {
+            return;
+        }
+        let progress = (0, files.len());
+        let source = files[0].clone();
+        let conversion = Conversion::start(ctx.clone(), converter, files);
+        self.conversion = Some(RunningConversion { conversion, source, progress });
+        self.message = None;
+    }
+
+    pub fn is_converting(&self) -> bool {
+        self.conversion.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn is_reading_converted(&self) -> bool {
+        !self.pending_converted.is_empty()
+    }
+
+    pub fn poll_conversion(&mut self, loader: &Loader) {
+        let Some(c) = &mut self.conversion else { return };
+        let mut finished = None;
+        for event in c.conversion.poll() {
+            match event {
+                dng_converter::Event::Progress(done, total) => c.progress = (done, total),
+                dng_converter::Event::Finished(result) => finished = Some(result),
+            }
+        }
+        let Some(result) = finished else { return };
+        let source = self.conversion.take().expect("running").source;
+        match result {
+            Ok(dngs) => {
+                self.message = Some((false, format!("Converted {} to DNG.", photo_count(dngs.len()))));
+                self.add_converted_stack(&source, dngs, loader);
+            }
+            Err(e) => self.message = Some((true, e)),
+        }
+    }
+
+    /// Puts `dngs` into a new stack after the one holding `source` (taking them out of any
+    /// other stack, e.g. from an earlier conversion) and loads their thumbnails.
+    fn add_converted_stack(&mut self, source: &Path, dngs: Vec<PathBuf>, loader: &Loader) {
+        for s in &mut self.stacks {
+            s.frames.retain(|p| !dngs.contains(p));
+            for p in &dngs {
+                s.excluded.remove(p);
+            }
+        }
+        self.stacks.retain(|s| !s.frames.is_empty());
+        let at =
+            self.stacks.iter().position(|s| s.frames.iter().any(|p| p == source)).map_or(self.stacks.len(), |i| i + 1);
+        let new: Vec<PathBuf> = dngs.iter().filter(|p| !self.photos.contains_key(*p)).cloned().collect();
+        self.stacks.insert(at, Stack { frames: dngs, boundary: 1.0, ..Default::default() });
+        self.checked = vec![false; self.stacks.len()];
+        self.status.clear();
+        self.pending_converted.extend(new.iter().cloned());
+        if !new.is_empty() {
+            loader.request_infos(new);
+        }
+        self.save();
+    }
+
     pub fn checked_count(&self) -> usize {
         self.checked.iter().filter(|c| **c).count()
     }
 
     /// Stacks the checked stacks one after another.
+    /// "Convert to DNG" for a stack with photos that can't be decoded, or the progress of
+    /// its conversion.
+    fn conversion_controls(&mut self, ui: &mut egui::Ui, i: usize, editable: bool) {
+        let stack = &self.stacks[i];
+        if let Some(c) = &self.conversion
+            && stack.frames.contains(&c.source)
+        {
+            if ui.add_enabled(!c.conversion.is_cancelling(), egui::Button::new("Cancel")).clicked() {
+                c.conversion.cancel();
+            }
+            let (done, total) = c.progress;
+            let text = format!("Converting {done} of {total}");
+            ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).text(text).desired_width(160.0));
+            return;
+        }
+        let converter = dng_converter::find();
+        if converter.is_none() && !dng_converter::AVAILABLE_ON_PLATFORM {
+            return;
+        }
+        let enabled = editable && converter.is_some() && self.conversion.is_none();
+        let button = ui
+            .add_enabled(enabled, egui::Button::new("Convert to DNG"))
+            .on_hover_text("Convert these photos with Adobe DNG Converter; the DNGs become a new stack")
+            .on_disabled_hover_text(match converter {
+                None => "Install Adobe DNG Converter (free from Adobe) to convert these photos.",
+                Some(_) => "Another conversion or a batch is running.",
+            });
+        if button.clicked() {
+            self.start_conversion(ui.ctx(), i);
+        }
+    }
+
+    /// Why a stack can't be stacked: the reason of the first included photo whose image
+    /// data can't be decoded.
+    fn blocked(&self, stack: &Stack) -> Option<&str> {
+        stack.included().iter().find_map(|p| self.photos.get(p)?.unsupported.as_deref())
+    }
+
     pub fn start_batch(&mut self, ctx: &egui::Context, settings: StackSettings) {
-        let stacks: Vec<usize> =
-            (0..self.stacks.len()).filter(|&i| self.checked[i] && self.stacks[i].included().len() >= 2).collect();
+        let stacks: Vec<usize> = (0..self.stacks.len())
+            .filter(|&i| {
+                let s = &self.stacks[i];
+                self.checked[i] && s.included().len() >= 2 && self.blocked(s).is_none()
+            })
+            .collect();
         if stacks.is_empty() || self.batch.is_some() {
             return;
         }
@@ -696,10 +857,16 @@ impl SessionView {
         let stack = self.stacks[i].clone();
         let stack = &stack;
         let included = stack.included().len();
+        let blocked = self.blocked(stack).map(|r| format!("Contains photos that can't be stacked: {r}"));
+        let stackable = included >= 2 && blocked.is_none();
         ui.horizontal(|ui| {
-            ui.add_enabled_ui(editable && included >= 2, |ui| {
-                ui.checkbox(&mut self.checked[i], RichText::new(format!("Stack {}", i + 1)).strong())
+            ui.add_enabled_ui(editable && stackable, |ui| {
+                let checkbox = ui
+                    .checkbox(&mut self.checked[i], RichText::new(format!("Stack {}", i + 1)).strong())
                     .on_hover_text("Include in “Render selected”");
+                if let Some(reason) = &blocked {
+                    checkbox.on_disabled_hover_text(reason);
+                }
             });
             ui.label(self.describe(stack));
             if stack.is_uncertain() {
@@ -731,8 +898,9 @@ impl SessionView {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(editable, |ui| {
                     if ui
-                        .add_enabled(included >= 2, egui::Button::new("Open"))
+                        .add_enabled(stackable, egui::Button::new("Open"))
                         .on_hover_text("Stack it in Preparation")
+                        .on_disabled_hover_text(blocked.as_deref().unwrap_or("Needs at least two photos"))
                         .clicked()
                     {
                         *action = Some(Action::OpenStack(stack.included()));
@@ -752,6 +920,9 @@ impl SessionView {
                         self.confirm_delete = Some(stack.frames.iter().chain(&stack.results).cloned().collect());
                     }
                 });
+                if blocked.is_some() {
+                    self.conversion_controls(ui, i, editable);
+                }
             });
         });
     }
@@ -820,7 +991,14 @@ impl SessionView {
                     let r = response.rect;
                     ui.painter().line_segment([r.left_top(), r.right_bottom()], egui::Stroke::new(2.0, ERROR_COLOR));
                 }
+                if photo.unsupported.is_some() {
+                    ui.painter().rect_filled(response.rect, 0.0, Color32::from_black_alpha(140));
+                    paint_badge(ui.painter(), response.rect, crate::toolbar::Icon::Blocked, ERROR_COLOR);
+                }
                 let mut hover = format!("{}\n{}", photo.file_name, exposure_text(&photo.shot.exposure));
+                if let Some(reason) = &photo.unsupported {
+                    hover += &format!("\nCan't be stacked: {reason}");
+                }
                 hover += "\nDouble-click to view";
                 if let Some(t) = photo.shot.capture_time {
                     hover += &format!("\n{}", t.format("%Y-%m-%d %H:%M:%S%.3f"));
@@ -1123,14 +1301,19 @@ fn paint_selection(ui: &egui::Ui, rect: egui::Rect) {
 
 /// The stacking method as a small icon in the top left corner of a result thumbnail.
 fn paint_method_badge(painter: &egui::Painter, thumb: egui::Rect, method: Method) {
-    let badge = egui::Rect::from_min_size(thumb.min + Vec2::splat(4.0), Vec2::splat(20.0));
-    let fill = Color32::from_gray(28);
-    painter.rect_filled(badge, 4.0, fill);
     let icon = match method {
         Method::DepthMap { .. } => crate::toolbar::Icon::DepthMap,
         Method::Pyramid { .. } => crate::toolbar::Icon::Pyramid,
     };
-    crate::toolbar::paint_icon(painter, icon, badge.shrink(3.0), Color32::from_gray(230), fill);
+    paint_badge(painter, thumb, icon, Color32::from_gray(230));
+}
+
+/// A small icon on a dark square in the top left corner of a thumbnail.
+fn paint_badge(painter: &egui::Painter, thumb: egui::Rect, icon: crate::toolbar::Icon, color: Color32) {
+    let badge = egui::Rect::from_min_size(thumb.min + Vec2::splat(4.0), Vec2::splat(20.0));
+    let fill = Color32::from_gray(28);
+    painter.rect_filled(badge, 4.0, fill);
+    crate::toolbar::paint_icon(painter, icon, badge.shrink(3.0), color, fill);
 }
 
 /// The settings of a result, one aspect per line.

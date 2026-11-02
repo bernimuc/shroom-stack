@@ -25,6 +25,8 @@ pub enum Icon {
     Save,
     Folder,
     Trash,
+    /// A file that can't be processed.
+    Blocked,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,6 +215,10 @@ pub fn paint_icon(painter: &egui::Painter, icon: Icon, r: Rect, color: Color32, 
             let outline = vec![p(0.06, 0.2), p(0.38, 0.2), p(0.48, 0.32), p(0.94, 0.32), p(0.94, 0.84), p(0.06, 0.84)];
             painter.add(Shape::closed_line(outline, stroke));
             painter.line_segment([p(0.06, 0.44), p(0.94, 0.44)], stroke);
+        }
+        Icon::Blocked => {
+            painter.circle_stroke(r.center(), 0.4 * s, stroke);
+            painter.line_segment([p(0.22, 0.22), p(0.78, 0.78)], stroke);
         }
         Icon::Trash => {
             painter.line_segment([p(0.1, 0.22), p(0.9, 0.22)], stroke);

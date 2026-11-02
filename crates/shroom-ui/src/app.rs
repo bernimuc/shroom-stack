@@ -202,6 +202,8 @@ impl ShroomApp {
             && !self.session.is_loading()
             && !self.session.is_batch_running()
             && !self.session.is_reading_results()
+            && !self.session.is_converting()
+            && !self.session.is_reading_converted()
             && self.running.is_none()
             && self.saving.is_none()
             && (self.selected.is_none()
@@ -343,6 +345,7 @@ impl ShroomApp {
         }
         self.receive_job(ctx);
         self.session.poll_batch(&self.loader);
+        self.session.poll_conversion(&self.loader);
         match self.dialogs.poll() {
             Some(Picked::Open(paths)) if self.workspace == Workspace::Preparation => self.add_files(paths),
             Some(Picked::Save(Some(path))) => self.save_to(path),
@@ -837,7 +840,7 @@ impl ShroomApp {
                     }
                 }
                 ui.separator();
-                let busy = self.session.is_batch_running() || self.session.is_loading();
+                let busy = self.session.is_batch_running() || self.session.is_loading() || self.session.is_converting();
                 open = ui
                     .add_enabled_ui(!busy && !self.dialogs.is_open(), |ui| {
                         toolbar::big_button(ui, Icon::Folder, "Open folder…", Kind::Plain)

@@ -69,6 +69,8 @@ impl FrameList {
     pub fn set_info(&mut self, path: &Path, result: Result<FrameInfo, String>) {
         if let Some(frame) = self.frames.iter_mut().find(|f| f.path == path) {
             match result {
+                // Listed, but not stackable.
+                Ok(FrameInfo { unsupported: Some(reason), .. }) => frame.error = Some(reason),
                 Ok(info) => frame.info = Some(info),
                 Err(e) => frame.error = Some(e),
             }
@@ -249,6 +251,7 @@ mod tests {
             mosaic: true,
             sources: Vec::new(),
             settings: None,
+            unsupported: None,
             exposure: Default::default(),
         }
     }

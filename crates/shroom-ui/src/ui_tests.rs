@@ -401,6 +401,76 @@ fn soft_bokeh_stack() {
     h.render().unwrap().save(out.join("soft_bokeh.png")).unwrap();
 }
 
+/// Nikon HE* NEFs (Stack 6) are listed from their embedded previews but can't be stacked.
+#[test]
+#[ignore]
+fn nikon_high_efficiency_nefs_are_listed_but_blocked() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Stack 6");
+    let Ok(entries) = std::fs::read_dir(&src) else { return };
+    let mut files: Vec<PathBuf> = entries.map(|e| e.unwrap().path()).collect();
+    files.sort();
+    let nefs: Vec<&PathBuf> = files.iter().filter(|p| p.extension().is_some_and(|e| e == "NEF")).collect();
+    let helicon = files.iter().find(|p| p.to_string_lossy().contains('(')).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for file in nefs.iter().copied().chain([helicon]) {
+        link_or_copy(file, &dir.path().join(file.file_name().unwrap()));
+    }
+    let mut h = harness(Vec::new());
+    h.run();
+    h.state_mut().open_folder_for_test(dir.path().to_path_buf());
+    step_until(&mut h, "grouping", |a| a.is_idle());
+    let sizes: Vec<usize> = h.state_mut().session().stacks().iter().map(|s| s.frames.len()).collect();
+    // One stack, although the effective aperture drifts during the bracket (macro lens).
+    assert_eq!(sizes, vec![nefs.len()]);
+    h.get_by_label_contains(&format!("{} can't be stacked: Nikon High Efficiency", nefs.len()));
+    assert!(h.get_by_label("Open").accesskit_node().is_disabled());
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-screenshots");
+    std::fs::create_dir_all(&out).unwrap();
+    h.render().unwrap().save(out.join("session_nikon_he.png")).unwrap();
+}
+
+/// "Convert to DNG" runs Adobe DNG Converter (if installed) on a blocked stack; the DNGs
+/// become a new stack that can be stacked.
+#[test]
+#[ignore]
+fn blocked_stack_converts_to_dng() {
+    if crate::dng_converter::find().is_none() {
+        return;
+    }
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Stack 6");
+    let Ok(entries) = std::fs::read_dir(&src) else { return };
+    let mut nefs: Vec<PathBuf> =
+        entries.map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "NEF")).collect();
+    nefs.sort();
+    nefs.truncate(4);
+    let dir = tempfile::tempdir().unwrap();
+    for file in &nefs {
+        link_or_copy(file, &dir.path().join(file.file_name().unwrap()));
+    }
+    let mut h = harness(Vec::new());
+    h.run();
+    h.state_mut().open_folder_for_test(dir.path().to_path_buf());
+    step_until(&mut h, "grouping", |a| a.is_idle());
+    h.get_by_label("Convert to DNG").click();
+    h.run();
+    step_until(&mut h, "conversion", |a| a.is_idle());
+    let stacks: Vec<Vec<PathBuf>> = h.state_mut().session().stacks().iter().map(|s| s.frames.clone()).collect();
+    assert_eq!(stacks.len(), 2, "{:?}", h.state_mut().session().message);
+    assert!(stacks[1].iter().all(|p| p.extension().is_some_and(|e| e == "dng") && p.exists()), "{stacks:?}");
+    h.get_by_label_contains("Converted 4 photos to DNG");
+    // The NEF stack stays blocked; the DNG stack can be opened.
+    let open: Vec<bool> = h.query_all_by_label("Open").map(|n| !n.accesskit_node().is_disabled()).collect();
+    assert_eq!(open, vec![false, true]);
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-screenshots");
+    std::fs::create_dir_all(&out).unwrap();
+    h.render().unwrap().save(out.join("session_converted.png")).unwrap();
+    // Reopened, the session file keeps NEFs and DNGs (same capture times) apart.
+    h.state_mut().open_folder_for_test(dir.path().to_path_buf());
+    step_until(&mut h, "reopening", |a| a.is_idle());
+    let reopened: Vec<Vec<PathBuf>> = h.state_mut().session().stacks().iter().map(|s| s.frames.clone()).collect();
+    assert_eq!(reopened, stacks);
+}
+
 #[test]
 fn session_without_folder_explains_itself() {
     let mut h = harness(Vec::new());

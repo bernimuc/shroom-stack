@@ -160,6 +160,9 @@ fn info(files: &[PathBuf]) -> anyhow::Result<()> {
             f.orientation.degrees(),
             preview
         );
+        if let Some(reason) = &f.unsupported {
+            println!("  not stackable: {reason}");
+        }
     }
     Ok(())
 }

@@ -165,10 +165,15 @@ pub fn analyse_gaps(shots: &[Shot]) -> Vec<Gap> {
                 changed(STRONG, "Image size changed".into());
             }
             let (ea, eb) = (&a.exposure, &b.exposure);
+            // Macro lenses report the effective aperture, which drifts by a fraction of a
+            // stop as focus bracketing moves the focus (and auto ISO or exposure time
+            // follow it); a set aperture changes by at least a third of a stop.
+            let mut drift = false;
             if let (Some(x), Some(y)) = (ea.f_number, eb.f_number)
                 && (x - y).abs() > 0.05
             {
-                changed(STRONG, format!("Aperture changed (f/{x} → f/{y})"));
+                drift = 2.0 * (y / x).log2().abs() < 0.3;
+                changed(if drift { 0.5 } else { STRONG }, format!("Aperture changed (f/{x} → f/{y})"));
             }
             if let (Some(x), Some(y)) = (ea.focal_length, eb.focal_length)
                 && (x - y).abs() > 0.5
@@ -178,13 +183,16 @@ pub fn analyse_gaps(shots: &[Shot]) -> Vec<Gap> {
             if a.orientation != b.orientation {
                 changed(3.0, "Orientation changed".into());
             }
-            // Exposure time and ISO may follow the light within a stack (auto modes).
+            // Exposure time and ISO may follow the light (or the drifting aperture) within a
+            // stack in auto modes.
             if let (Some(x), Some(y)) = (ea.time, eb.time)
+                && !drift
                 && (x / y - 1.0).abs() > 0.01
             {
                 changed(WEAK, format!("Exposure time changed ({} → {})", exposure_time(x), exposure_time(y)));
             }
             if let (Some(x), Some(y)) = (ea.iso, eb.iso)
+                && !drift
                 && x != y
             {
                 changed(WEAK, format!("ISO changed ({x} → {y})"));
@@ -574,6 +582,17 @@ mod tests {
         let gaps = analyse_gaps(&s);
         assert_eq!(stack_starts(&gaps), vec![0, 10]);
         assert!(gaps[9].reasons.iter().any(|r| r.contains("Aperture")), "{:?}", gaps[9].reasons);
+    }
+
+    #[test]
+    fn effective_aperture_drift_stays_in_the_stack() {
+        // As in a Nikon macro bracket: f/5.3 → f/5 → f/4.8, with auto ISO following.
+        let mut s = shots(&burst(0.0, 30, 0.2));
+        for (i, shot) in s.iter_mut().enumerate() {
+            shot.exposure.f_number = Some([5.3, 5.0, 4.8][i / 10]);
+            shot.exposure.iso = Some([220, 200, 180][i / 10]);
+        }
+        assert_eq!(stack_starts(&analyse_gaps(&s)), vec![0]);
     }
 
     #[test]
