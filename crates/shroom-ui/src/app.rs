@@ -610,9 +610,26 @@ impl ShroomApp {
             Workspace::Postprocessing => self.postprocessing_toolbar(ui),
         }
         let status = if self.workspace == Workspace::Session { &self.session.message } else { &self.status };
-        if let Some((error, message)) = status {
-            ui.colored_label(if *error { ERROR_COLOR } else { Color32::LIGHT_GREEN }, message);
+        // In Session, the folder is shown before the message.
+        let session = self.workspace == Workspace::Session;
+        if !session && status.is_none() {
+            ui.add_space(4.0);
+            return;
         }
+        ui.horizontal(|ui| {
+            if session {
+                match self.session.folder() {
+                    Some(folder) => ui.label(folder.display().to_string()),
+                    None => ui.label(RichText::new("No folder").weak()),
+                };
+                if status.is_some() {
+                    ui.separator();
+                }
+            }
+            if let Some((error, message)) = status {
+                ui.colored_label(if *error { ERROR_COLOR } else { Color32::LIGHT_GREEN }, message);
+            }
+        });
         ui.add_space(4.0);
     }
 
@@ -748,16 +765,7 @@ impl ShroomApp {
 
     fn session_toolbar(&mut self, ui: &mut egui::Ui) {
         let mut render = false;
-        ui.horizontal(|ui| {
-            let busy = self.session.is_batch_running() || self.session.is_loading();
-            if ui.add_enabled(!busy && !self.dialogs.is_open(), egui::Button::new("Open folder…")).clicked() {
-                self.dialogs.pick_folder();
-            }
-            match self.session.folder() {
-                Some(folder) => ui.label(folder.display().to_string()),
-                None => ui.label(RichText::new("No folder").weak()),
-            };
-        });
+        let mut open = false;
         toolbar::bar(ui, |ui| {
             ui.add_enabled_ui(!self.session.is_batch_running(), |ui| self.parameter_controls(ui));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -782,8 +790,20 @@ impl ShroomApp {
                         .clicked();
                     }
                 }
+                ui.separator();
+                let busy = self.session.is_batch_running() || self.session.is_loading();
+                open = ui
+                    .add_enabled_ui(!busy && !self.dialogs.is_open(), |ui| {
+                        toolbar::big_button(ui, Icon::Folder, "Open folder…", Kind::Plain)
+                    })
+                    .inner
+                    .on_hover_text("Choose the folder of a shooting session")
+                    .clicked();
             });
         });
+        if open {
+            self.dialogs.pick_folder();
+        }
         if render {
             let settings = self.params.settings();
             self.session.start_batch(ui.ctx(), settings);
@@ -853,45 +873,49 @@ impl ShroomApp {
         ui.add_space(4.0);
         let brush = &mut tool.brush;
         let active = tool.active;
-        toolbar::rows(
-            ui,
-            "brush_settings",
-            vec![
-                Box::new(|ui| {
-                    let label = ui.add_enabled(active, egui::Label::new("Size"));
-                    ui.add_enabled(
-                        active,
-                        egui::Slider::new(&mut brush.radius, 2.0..=600.0).logarithmic(true).suffix(" px"),
-                    )
-                    .labelled_by(label.id)
-                    .on_hover_text("Brush radius in image pixels ([ and ] change it)");
-                }),
-                Box::new(|ui| {
-                    let label = ui.add_enabled(active, egui::Label::new("Softness"));
-                    ui.add_enabled(active, egui::Slider::new(&mut brush.softness, 0.0..=1.0))
+        ui.scope(|ui| {
+            // Same width for both value fields, wide enough for "600 px".
+            ui.spacing_mut().interact_size.x = 58.0;
+            toolbar::rows(
+                ui,
+                "brush_settings",
+                vec![
+                    Box::new(|ui| {
+                        let label = ui.add_enabled(active, egui::Label::new("Size"));
+                        ui.add_enabled(
+                            active,
+                            egui::Slider::new(&mut brush.radius, 2.0..=600.0).logarithmic(true).suffix(" px"),
+                        )
                         .labelled_by(label.id)
-                        .on_hover_text("0 = hard edge, 1 = soft fall-off");
-                }),
-                Box::new(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        undo = ui
-                            .add_enabled_ui(done.retouch.can_undo(), |ui| {
-                                toolbar::icon_button(ui, Icon::Undo, "Undo", "Undo (Cmd/Ctrl+Z)")
-                            })
-                            .inner
-                            .clicked();
-                        redo = ui
-                            .add_enabled_ui(done.retouch.can_redo(), |ui| {
-                                toolbar::icon_button(ui, Icon::Redo, "Redo", "Redo (Shift+Cmd/Ctrl+Z)")
-                            })
-                            .inner
-                            .clicked();
-                    });
-                    ui.label("");
-                }),
-            ],
-        );
+                        .on_hover_text("Brush radius in image pixels ([ and ] change it)");
+                    }),
+                    Box::new(|ui| {
+                        let label = ui.add_enabled(active, egui::Label::new("Softness"));
+                        ui.add_enabled(active, egui::Slider::new(&mut brush.softness, 0.0..=1.0))
+                            .labelled_by(label.id)
+                            .on_hover_text("0 = hard edge, 1 = soft fall-off");
+                    }),
+                    Box::new(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            undo = ui
+                                .add_enabled_ui(done.retouch.can_undo(), |ui| {
+                                    toolbar::icon_button(ui, Icon::Undo, "Undo", "Undo (Cmd/Ctrl+Z)")
+                                })
+                                .inner
+                                .clicked();
+                            redo = ui
+                                .add_enabled_ui(done.retouch.can_redo(), |ui| {
+                                    toolbar::icon_button(ui, Icon::Redo, "Redo", "Redo (Shift+Cmd/Ctrl+Z)")
+                                })
+                                .inner
+                                .clicked();
+                        });
+                        ui.label("");
+                    }),
+                ],
+            );
+        });
         if self.brush.active {
             self.show_map = false;
         }

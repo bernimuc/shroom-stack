@@ -22,6 +22,7 @@ pub enum Icon {
     Redo,
     NewStack,
     Save,
+    Folder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,6 +187,11 @@ fn paint_icon(painter: &egui::Painter, icon: Icon, r: Rect, color: Color32, bg: 
             painter.rect_stroke(page, 2.0, stroke, StrokeKind::Middle);
             painter.line_segment([p(0.5, 0.3), p(0.5, 0.7)], stroke);
             painter.line_segment([p(0.3, 0.5), p(0.7, 0.5)], stroke);
+        }
+        Icon::Folder => {
+            let outline = vec![p(0.06, 0.2), p(0.38, 0.2), p(0.48, 0.32), p(0.94, 0.32), p(0.94, 0.84), p(0.06, 0.84)];
+            painter.add(Shape::closed_line(outline, stroke));
+            painter.line_segment([p(0.06, 0.44), p(0.94, 0.44)], stroke);
         }
         Icon::Save => {
             painter.line_segment([p(0.5, 0.06), p(0.5, 0.62)], stroke);
