@@ -1,8 +1,12 @@
 # Shroom Stack
 
 Focus stacking for macro photography: combines a series of raw frames (DNG, CR3 and
-other camera raw formats) with different focal planes into one image that is sharp throughout, and writes it as a Linear DNG
-that stays fully editable in Lightroom.
+other camera raw formats) or JPEGs with different focal planes into one image that is sharp throughout, and writes it as a Linear DNG
+that stays fully editable in Lightroom, or as a JPEG.
+
+JPEG frames are decoded from sRGB into linear values for stacking; their EXIF (capture
+time, orientation, camera, exposure) is used like that of raw files. In folders, a JPEG
+the camera saved next to a raw file of the same name (RAW+JPEG) is ignored.
 
 Raw decoding uses [rawler](https://github.com/dnglab/dnglab). Not readable yet: Nikon NEFs
 in the High Efficiency modes (HE/HE*), whose TicoRAW codec has no open decoder. Manage
@@ -62,11 +66,11 @@ On Linux the usual windowing libraries are needed (e.g. on Debian/Ubuntu:[Shroom
      written next to the originals and listed as a new stack.
    - **Open** loads a stack into Preparation; **Render selected** stacks the checked
      stacks one after another and saves each result next to its originals
-     (`<first photo>-stacked.dng`, numbered instead of overwriting).
+     (`<first photo>-stacked.dng` or `.jpg`, numbered instead of overwriting).
 
    The grouping is kept in `Shroom Stack session.json` in the folder and restored when it
    is opened again.
-2. **Preparation:** add raw files ("Add images…", drag & drop of files or a folder).
+2. **Preparation:** add raw files or JPEGs ("Add images…", drag & drop of files or a folder).
    They are sorted by capture time; reorder with Up/Down/Reverse if needed. Choose the
    method and parameters (optionally **Soft bokeh** with its source frame and
    threshold), then **Render**. Checks run first (frame count, sizes,
@@ -78,8 +82,13 @@ On Linux the usual windowing libraries are needed (e.g. on Debian/Ubuntu:[Shroom
    `[` `]`, undo Cmd/Ctrl+Z, redo Shift+Cmd/Ctrl+Z. **Save…** writes a Linear DNG (a free
    name is suggested).
 
+**Format** (in Manage stacks and Postprocessing) chooses how results are saved: Linear DNG,
+or JPEG with a **Quality** (1–100, default 92). JPEGs are rendered like the on-screen view
+and keep the source's EXIF (camera, exposure, lens, capture time, GPS), its ICC profile if
+it was a JPEG, and the result's orientation.
+
 Results record the source frames (`xmpMM:Ingredients`) and the stacking settings in their
-XMP metadata.
+XMP metadata (JPEG results too, which is how Manage stacks tells them from photos).
 
 Orientation: taken from the camera (EXIF); **Rotate left/right** (Cmd/Ctrl+[ / ]) in
 Preparation and Postprocessing override it for the whole stack and for the saved file.
@@ -101,7 +110,8 @@ cargo run --release -p shroom-cli -- sharpness a.dng b.dng   # compare detail en
 
 `stack` options: `--method depth-map|pyramid`, `--radius`, `--smoothing`, `--no-align`,
 `--cpu`, `--preview`, `--depth-map`, `--bokeh most-blurred|nearest-focus`,
-`--bokeh-threshold`, `--bokeh-mask` (preview with the soft bokeh areas tinted).
+`--bokeh-threshold`, `--bokeh-mask` (preview with the soft bokeh areas tinted). An output
+ending in `.jpg`/`.jpeg` is written as JPEG (`--quality`, default 92), also for `convert`.
 
 ## Development
 

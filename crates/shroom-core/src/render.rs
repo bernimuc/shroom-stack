@@ -20,6 +20,20 @@ impl Default for ColorInfo {
     }
 }
 
+impl ColorInfo {
+    /// Colours of linear sRGB data (e.g. decoded JPEGs): rendering is the identity.
+    pub fn srgb() -> Self {
+        Self { wb: [1.0; 3], xyz_to_cam: Some(XYZ_TO_SRGB) }
+    }
+}
+
+/// XYZ → linear sRGB (D65), the inverse of [`SRGB_TO_XYZ`].
+pub(crate) const XYZ_TO_SRGB: [[f32; 3]; 3] = [
+    [3.240_454_2, -1.537_138_5, -0.498_531_4],
+    [-0.969_266, 1.876_010_8, 0.041_556],
+    [0.055_643_4, -0.204_025_9, 1.057_225_2],
+];
+
 /// Linear sRGB (D65) → XYZ.
 const SRGB_TO_XYZ: [[f32; 3]; 3] = [
     [0.412_456_4, 0.357_576_1, 0.180_437_5],
@@ -171,6 +185,16 @@ mod tests {
         let out: Vec<f32> = (0..3).map(|c| m[c].iter().sum()).collect();
         for v in out {
             assert!((v - 1.0).abs() < 1e-4, "camera neutral must map to sRGB white");
+        }
+    }
+
+    #[test]
+    fn srgb_colour_info_renders_unchanged() {
+        let m = ColorInfo::srgb().cam_to_srgb();
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((m[i][j] - IDENTITY[i][j]).abs() < 1e-4, "{m:?}");
+            }
         }
     }
 

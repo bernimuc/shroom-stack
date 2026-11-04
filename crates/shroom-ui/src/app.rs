@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use eframe::egui::{self, Color32, RichText, Vec2};
+use shroom_core::io::ResultFormat;
 use shroom_core::render::{ColorInfo, render_depth_map, render_display};
 use shroom_core::retouch::{Brush, Retouch};
 use shroom_core::stack::{BokehFrame, Method, Progress, SoftBokeh, StackSettings, Stage};
@@ -45,6 +46,9 @@ struct Parameters {
     align: bool,
     bokeh: bool,
     bokeh_settings: SoftBokeh,
+    /// Save results as JPEG instead of Linear DNG.
+    jpeg: bool,
+    jpeg_quality: u8,
 }
 
 impl Default for Parameters {
@@ -59,6 +63,8 @@ impl Default for Parameters {
             align: true,
             bokeh: false,
             bokeh_settings: SoftBokeh::DEFAULT,
+            jpeg: false,
+            jpeg_quality: shroom_core::io::DEFAULT_JPEG_QUALITY,
         }
     }
 }
@@ -71,6 +77,11 @@ impl Parameters {
             use_gpu: true,
             bokeh: self.bokeh.then_some(self.bokeh_settings),
         }
+    }
+
+    /// The format results are saved in.
+    fn result_format(&self) -> ResultFormat {
+        if self.jpeg { ResultFormat::Jpeg { quality: self.jpeg_quality } } else { ResultFormat::Dng }
     }
 
     fn method(&self) -> Method {
@@ -241,20 +252,23 @@ impl ShroomApp {
         self.running.as_ref().is_some_and(|r| r.frame.is_some() && r.map.is_some())
     }
 
-    /// Adds DNG files; folders are searched (one level deep).
+    /// Adds raw files and JPEGs; folders are searched (one level deep).
     fn add_files(&mut self, paths: Vec<PathBuf>) {
-        let (found, skipped) = crate::frames::collect_raw_files(paths);
+        let (found, skipped) = crate::frames::collect_input_files(paths);
         let added = self.frames.add(found);
         self.status = match (added.is_empty(), skipped) {
             (true, 0) => None,
             (true, n) => Some((
                 true,
                 format!(
-                    "No raw files added ({n} other files ignored; only raw formats like DNG or CR3 are supported)."
+                    "No images added ({n} other files ignored; only raw formats like DNG or CR3 and JPEG are \
+                     supported)."
                 ),
             )),
             (false, 0) => None,
-            (false, n) => Some((false, format!("{n} files ignored: only raw formats like DNG or CR3 are supported."))),
+            (false, n) => {
+                Some((false, format!("{n} files ignored: only raw formats like DNG or CR3 and JPEG are supported.")))
+            }
         };
         for path in added {
             self.loader.request_info(path);
@@ -461,13 +475,20 @@ impl ShroomApp {
         let Some(done) = &self.done else { return };
         // A free name is suggested; the system's save dialog asks before replacing a file
         // the user picks.
-        let suggested = crate::batch::result_path(&done.finished.paths[0]);
+        let format = self.params.result_format();
+        let suggested = crate::batch::result_path(&done.finished.paths[0], format);
         let name = suggested.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        self.dialogs.save_dng(name, suggested.parent().map(|d| d.to_path_buf()));
+        self.dialogs.save_result(format, name, suggested.parent().map(|d| d.to_path_buf()));
     }
 
+    /// Saves the result to `path`: as JPEG if its name ends in .jpg/.jpeg, else as Linear DNG.
     fn save_to(&mut self, path: PathBuf) {
         let Some(done) = &self.done else { return };
+        let format = if shroom_core::io::is_jpeg_file(&path) {
+            ResultFormat::Jpeg { quality: self.params.jpeg_quality }
+        } else {
+            ResultFormat::Dng
+        };
         let (image, template) = (
             done.retouch.image().clone(),
             done.finished
@@ -479,9 +500,7 @@ impl ShroomApp {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let software = concat!("Shroom Stack ", env!("CARGO_PKG_VERSION"));
-            let result = shroom_core::io::write_linear_dng(&path, &image, &template, software)
-                .map(|()| path)
-                .map_err(|e| e.to_string());
+            let result = format.write(&path, &image, &template, software).map(|()| path).map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
         self.saving = Some(rx);
@@ -780,6 +799,38 @@ impl ShroomApp {
         });
     }
 
+    /// The format results are saved in, and the JPEG quality.
+    fn result_controls(&mut self, ui: &mut egui::Ui) {
+        let p = &mut self.params;
+        // As of the start of the frame; a change shows in the next one.
+        let enabled = p.jpeg;
+        let mut rows: Vec<toolbar::Row> = Vec::new();
+        let jpeg = &mut p.jpeg;
+        rows.push(Box::new(|ui| {
+            let label = ui.label("Format");
+            egui::ComboBox::from_id_salt("result_format")
+                .selected_text(if *jpeg { "JPEG" } else { "Linear DNG" })
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(jpeg, false, "Linear DNG")
+                        .on_hover_text("All the linear image data, for raw converters like Lightroom.");
+                    ui.selectable_value(jpeg, true, "JPEG")
+                        .on_hover_text("Rendered as shown here, ready to share; less room for editing.");
+                })
+                .response
+                .labelled_by(label.id)
+                .on_hover_text("File format of saved results");
+        }));
+        let quality = &mut p.jpeg_quality;
+        rows.push(Box::new(move |ui| {
+            let label = ui.add_enabled(enabled, egui::Label::new("Quality"));
+            ui.add_enabled(enabled, egui::DragValue::new(quality).range(1..=100))
+                .labelled_by(label.id)
+                .on_hover_text("JPEG quality: higher keeps more detail but makes larger files.");
+        }));
+        toolbar::rows(ui, "result_settings", rows);
+    }
+
     /// The big green button that starts stacking.
     fn render_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
         ui.add_enabled_ui(enabled, |ui| toolbar::big_button(ui, Icon::Render, label, Kind::Primary)).inner
@@ -816,7 +867,11 @@ impl ShroomApp {
         let mut render = false;
         let mut open = false;
         toolbar::bar(ui, |ui| {
-            ui.add_enabled_ui(!self.session.is_batch_running(), |ui| self.parameter_controls(ui));
+            ui.add_enabled_ui(!self.session.is_batch_running(), |ui| {
+                self.parameter_controls(ui);
+                ui.separator();
+                self.result_controls(ui);
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 match self.session.batch_progress() {
                     Some((fraction, text, cancelling)) => {
@@ -855,7 +910,7 @@ impl ShroomApp {
         }
         if render {
             let settings = self.params.settings();
-            self.session.start_batch(ui.ctx(), settings);
+            self.session.start_batch(ui.ctx(), settings, self.params.result_format());
         }
     }
 
@@ -887,13 +942,18 @@ impl ShroomApp {
             self.brush_toolbar(ui);
             ui.separator();
             self.rotate_buttons(ui);
+            ui.separator();
+            self.result_controls(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 save = ui
                     .add_enabled_ui(self.saving.is_none() && !self.dialogs.is_open(), |ui| {
                         toolbar::big_button(ui, Icon::Save, "Save…", Kind::Plain)
                     })
                     .inner
-                    .on_hover_text("Save the result as Linear DNG")
+                    .on_hover_text(match self.params.result_format() {
+                        ResultFormat::Dng => "Save the result as Linear DNG",
+                        ResultFormat::Jpeg { .. } => "Save the result as JPEG",
+                    })
                     .clicked();
                 new_stack = toolbar::big_button(ui, Icon::NewStack, "New stack", Kind::Plain)
                     .on_hover_text("Back to Preparation (discards this result)")
@@ -1089,7 +1149,7 @@ impl ShroomApp {
         ui.add_enabled_ui(editable, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if ui.add_enabled(!self.dialogs.is_open(), egui::Button::new("Add images…")).clicked() {
-                    self.dialogs.pick_raw_files();
+                    self.dialogs.pick_input_files();
                 }
                 if ui
                     .add_enabled(!self.frames.frames.is_empty(), egui::Button::new("Clear"))
@@ -1136,7 +1196,9 @@ impl ShroomApp {
             if self.frames.frames.is_empty() {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("Add raw files (DNG, CR3, …) or drop files or a folder here.").weak())
+                    ui.label(
+                        RichText::new("Add raw files (DNG, CR3, …) or JPEGs, or drop files or a folder here.").weak(),
+                    )
                 });
             }
             for (i, frame) in self.frames.frames.iter().enumerate() {

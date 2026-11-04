@@ -75,6 +75,8 @@ pub struct DngTemplate {
     pub(super) sources: Vec<String>,
     /// Stacking settings of a result, recorded in its XMP.
     pub(super) params: Vec<(&'static str, String)>,
+    /// ICC profile of a JPEG source, kept for JPEG results.
+    pub(super) icc: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for DngTemplate {
@@ -159,6 +161,9 @@ const NIKON_HE_MESSAGE: &str = "Nikon High Efficiency (HE/HE*) NEFs can't be rea
                                 Adobe DNG Converter, or shoot NEF with \"Lossless compressed\".";
 
 pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
+    if super::jpeg::has_jpeg_signature(path) {
+        return super::jpeg::read_frame_info(path);
+    }
     let Opened { source, decoder } = open(path)?;
     let params = RawDecodeParams::default();
     let metadata = decoder.raw_metadata(&source, &params).map_err(|e| decode_err(path, e))?;
@@ -205,6 +210,7 @@ pub(super) fn read_frame_info(path: &Path) -> Result<FrameInfo> {
         orientation: crate::Orientation::from_exif(raw.orientation.to_u16()),
         camera_values_known,
         mosaic,
+        jpeg: false,
         sources,
         settings,
         exposure: exposure(&metadata),
@@ -235,6 +241,7 @@ fn unsupported_info(
         orientation: crate::Orientation::from_exif(metadata.exif.orientation.unwrap_or(1)),
         camera_values_known: false,
         mosaic: true,
+        jpeg: false,
         sources: Vec::new(),
         settings: None,
         exposure: exposure(metadata),
@@ -242,7 +249,7 @@ fn unsupported_info(
     }
 }
 
-fn exposure(metadata: &RawMetadata) -> super::Exposure {
+pub(super) fn exposure(metadata: &RawMetadata) -> super::Exposure {
     let e = &metadata.exif;
     let ratio = |r: &rawler::formats::tiff::Rational| (r.d != 0).then(|| r.n as f32 / r.d as f32);
     super::Exposure {
@@ -253,7 +260,7 @@ fn exposure(metadata: &RawMetadata) -> super::Exposure {
     }
 }
 
-fn capture_time(metadata: &RawMetadata) -> Option<NaiveDateTime> {
+pub(super) fn capture_time(metadata: &RawMetadata) -> Option<NaiveDateTime> {
     let base = metadata.exif.date_time_original.as_deref()?;
     let subsec = metadata.exif.sub_sec_time_original.as_deref().unwrap_or("0");
     NaiveDateTime::parse_from_str(&format!("{base}.{}", subsec.trim()), "%Y:%m:%d %H:%M:%S%.f")
@@ -262,7 +269,7 @@ fn capture_time(metadata: &RawMetadata) -> Option<NaiveDateTime> {
 }
 
 /// Longer side of previews kept in [`FrameInfo`].
-const MAX_PREVIEW: u32 = 1024;
+pub(super) const MAX_PREVIEW: u32 = 1024;
 
 /// TIFF tag present in every DNG.
 const DNG_VERSION_TAG: u16 = 50706;
@@ -367,14 +374,25 @@ fn decode_full(path: &Path) -> Result<(RawImage, DngTemplate)> {
     // rawler's DNG decoder doesn't implement `xpacket`, so read the XMP tag directly.
     let xmp = xmp_packet(decoder.as_ref()).or_else(|| lens_xmp(&metadata));
     let data = std::mem::replace(&mut raw.data, RawImageData::Integer(Vec::new()));
-    let template =
-        DngTemplate { raw: raw.clone(), metadata, root_tags, raw_tags, xmp, sources: Vec::new(), params: Vec::new() };
+    let template = DngTemplate {
+        raw: raw.clone(),
+        metadata,
+        root_tags,
+        raw_tags,
+        xmp,
+        sources: Vec::new(),
+        params: Vec::new(),
+        icc: None,
+    };
     raw.data = data;
     Ok((raw, template))
 }
 
-/// Reads the metadata needed to write a result DNG based on this file.
+/// Reads the metadata needed to write a result file based on this file.
 pub fn read_template(path: &Path) -> Result<DngTemplate> {
+    if super::jpeg::has_jpeg_signature(path) {
+        return super::jpeg::read_template(path);
+    }
     Ok(decode_full(path)?.1)
 }
 
@@ -429,6 +447,9 @@ fn cfa_frame(path: &Path, raw: RawImage, template: DngTemplate) -> Result<RawFra
 /// Loads a frame for stacking: Bayer data stays a mosaic (demosaiced by the compute
 /// backend), anything else is loaded as linear RGB.
 pub(crate) fn load_for_stacking(path: &Path) -> Result<crate::stack::SourceFrame> {
+    if super::jpeg::has_jpeg_signature(path) {
+        return Ok(crate::stack::SourceFrame::Rgb(super::jpeg::load_linear(path)?.image));
+    }
     let (raw, template) = decode_full(path)?;
     if matches!(raw.photometric, RawPhotometricInterpretation::Cfa(_)) {
         let frame = cfa_frame(path, raw, template)?;
@@ -438,8 +459,12 @@ pub(crate) fn load_for_stacking(path: &Path) -> Result<crate::stack::SourceFrame
     }
 }
 
-/// Loads a DNG as linear camera RGB, demosaicing Bayer data if necessary.
+/// Loads a raw file as linear camera RGB, demosaicing Bayer data if necessary, or a JPEG
+/// as linear sRGB.
 pub fn load_linear(path: &Path) -> Result<LinearFrame> {
+    if super::jpeg::has_jpeg_signature(path) {
+        return super::jpeg::load_linear(path);
+    }
     let (raw, template) = decode_full(path)?;
     match &raw.photometric {
         RawPhotometricInterpretation::Cfa(_) => {
@@ -539,6 +564,7 @@ pub(crate) mod tests {
             xmp: None,
             sources: Vec::new(),
             params: Vec::new(),
+            icc: None,
         }
     }
 

@@ -128,6 +128,20 @@ fn soft_bokeh_shows_its_parameters() {
     h.get(by().value("Nearest focus"));
 }
 
+#[test]
+fn result_format_offers_jpeg_with_quality() {
+    let mut h = harness(Vec::new());
+    h.run();
+    let by = egui_kittest::kittest::by;
+    assert!(h.get_by_label("Quality").accesskit_node().is_disabled());
+    h.get(by().value("Linear DNG")).click();
+    h.run();
+    h.get_by_label("JPEG").click();
+    h.run();
+    h.get(by().value("JPEG"));
+    assert!(!h.get_by_label("Quality").accesskit_node().is_disabled());
+}
+
 /// Loads Stack 3 from `examples/` and writes screenshots to `target/ui-screenshots/`.
 /// Run with `cargo test -p shroom-ui -- --ignored`.
 #[test]
@@ -664,4 +678,45 @@ fn session_groups_edits_and_renders() {
     assert_eq!(h.state().workspace(), Workspace::Preparation);
     step_until(&mut h, "files", |a| a.is_idle());
     assert!(h.state().frame_count() >= 3);
+}
+
+/// JPEG frames (Stack 8 JPEG, made from Stack 4 with `shroom convert`) stack with both
+/// methods; the result saves as JPEG and is recognised as a stacking result.
+#[test]
+#[ignore]
+fn jpeg_stack() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Stack 8 JPEG");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let mut files: Vec<PathBuf> =
+        entries.map(|e| e.unwrap().path()).filter(|p| shroom_core::io::is_jpeg_file(p)).collect();
+    files.sort();
+    files.truncate(4);
+    for method in ["Depth map", "Pyramid"] {
+        let mut h = harness(files.clone());
+        step_until(&mut h, "files", |a| a.is_idle());
+        h.get_by_label(method).click();
+        h.run();
+        h.get_by_label("Render").click();
+        h.run();
+        assert!(h.query_by_label_contains("Error").is_none());
+        step_until(&mut h, "result", |a| a.workspace() == Workspace::Postprocessing && a.is_idle());
+        h.get_by_label_contains("Stacked 4 images");
+        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-screenshots");
+        std::fs::create_dir_all(&out).unwrap();
+        h.render().unwrap().save(out.join(format!("jpeg_{}.png", method.replace(' ', "_")))).unwrap();
+        // The frames are portrait (EXIF orientation), like the raw files they came from.
+        assert_eq!(h.state().orientation(), shroom_core::Orientation::Cw270);
+
+        let saved = std::env::temp_dir().join(format!("shroom-ui-test-{}.jpg", method.replace(' ', "-")));
+        let _ = std::fs::remove_file(&saved);
+        h.state_mut().save_for_test(saved.clone());
+        step_until(&mut h, "saving", |a| a.is_idle());
+        h.get_by_label_contains("Saved");
+        let info = shroom_core::io::read_frame_info(&saved).unwrap();
+        assert!(info.jpeg && info.is_result());
+        assert_eq!(info.sources.len(), 4);
+        assert_eq!(info.orientation, shroom_core::Orientation::Cw270);
+        assert!(info.width > 8000, "{}", info.width);
+        std::fs::remove_file(&saved).unwrap();
+    }
 }

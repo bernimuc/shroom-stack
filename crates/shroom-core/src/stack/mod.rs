@@ -76,7 +76,7 @@ pub trait FrameSource: Sync {
     }
 }
 
-/// Frames read from DNG files.
+/// Frames read from raw or JPEG files.
 pub struct FileFrames {
     pub paths: Vec<PathBuf>,
 }
@@ -99,9 +99,9 @@ impl FrameSource for FileFrames {
         Some((info.width, info.height))
     }
 
-    /// DNGs decode quickly; camera formats like CR3 take several times as long.
+    /// DNGs and JPEGs decode quickly; camera formats like CR3 take several times as long.
     fn slow_to_decode(&self) -> bool {
-        self.paths.iter().any(|p| !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dng")))
+        self.paths.iter().any(|p| crate::io::is_slow_to_decode(p))
     }
 }
 

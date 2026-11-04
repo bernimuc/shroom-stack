@@ -24,8 +24,16 @@ const LJ92_PREDICTOR: u8 = 1;
 /// The file is written to a temporary name first and renamed on success, so a failed
 /// write never leaves a truncated file at `path`.
 pub fn write_linear_dng(path: &Path, image: &RgbImage, template: &DngTemplate, software: &str) -> Result<()> {
-    let tmp = path.with_extension("dng.part");
-    let result = write_to(&tmp, image, template, software)
+    write_atomically(path, |tmp| write_to(tmp, image, template, software))
+}
+
+/// Runs `write` on `<path>.part` (e.g. `out.dng.part`) and renames that to `path` on
+/// success; removes it on failure.
+pub(super) fn write_atomically(path: &Path, write: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    let tmp = path.with_file_name(name);
+    let result = write(&tmp)
         .and_then(|()| std::fs::rename(&tmp, path).map_err(|source| Error::Io { path: path.into(), source }));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);

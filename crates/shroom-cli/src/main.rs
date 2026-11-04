@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use shroom_core::io::{self, FrameInfo};
+use shroom_core::io::{self, FrameInfo, ResultFormat};
 use shroom_core::render::{render_depth_map, render_display};
 use shroom_core::stack::{self, BokehFrame, CancelToken, FileFrames, Method, SoftBokeh, StackSettings, Stage};
 use shroom_core::{DisplayImage, Rect};
@@ -33,13 +33,24 @@ enum BokehArg {
 enum Command {
     /// Show metadata of input files in shooting order.
     Info { files: Vec<PathBuf> },
-    /// Demosaic a raw DNG and write it as Linear DNG.
-    Convert { input: PathBuf, output: PathBuf },
-    /// Focus-stack DNG files into a Linear DNG.
+    /// Demosaic a raw file (or decode a JPEG) and write it as Linear DNG, or as JPEG if the
+    /// output ends in .jpg/.jpeg.
+    Convert {
+        input: PathBuf,
+        output: PathBuf,
+        /// JPEG quality (1–100).
+        #[arg(long, default_value_t = io::DEFAULT_JPEG_QUALITY, value_parser = clap::value_parser!(u8).range(1..=100))]
+        quality: u8,
+    },
+    /// Focus-stack raw or JPEG files into a Linear DNG, or a JPEG if the output ends in
+    /// .jpg/.jpeg.
     Stack {
         files: Vec<PathBuf>,
         #[arg(short, long)]
         output: PathBuf,
+        /// JPEG quality (1–100) for JPEG output.
+        #[arg(long, default_value_t = io::DEFAULT_JPEG_QUALITY, value_parser = clap::value_parser!(u8).range(1..=100))]
+        quality: u8,
         #[arg(long, value_enum, default_value_t = MethodArg::DepthMap)]
         method: MethodArg,
         /// Focus window radius (depth map method).
@@ -85,7 +96,7 @@ enum Command {
         #[arg(long, default_value_t = 0.01)]
         threshold: f32,
     },
-    /// Render a DNG to a JPEG preview.
+    /// Render a raw file or JPEG to a JPEG preview.
     Preview {
         input: PathBuf,
         output: PathBuf,
@@ -104,13 +115,14 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Info { files } => info(&files),
-        Command::Convert { input, output } => convert(&input, &output),
+        Command::Convert { input, output, quality } => convert(&input, &output, result_format(&output, quality)),
         Command::Sharpness { files, tiles } => sharpness(&files, tiles),
         Command::Shadows { files, threshold } => shadows(&files, threshold),
         Command::Preview { input, output, size, crop, ev } => preview(&input, &output, size, crop, ev),
         Command::Stack {
             files,
             output,
+            quality,
             method,
             radius,
             smoothing,
@@ -139,7 +151,7 @@ fn main() -> anyhow::Result<()> {
                 depth_map: depth_map.as_deref(),
                 bokeh_mask: bokeh_mask.as_deref(),
             };
-            stack_files(&files, &output, &settings, &outputs)
+            stack_files(&files, &output, result_format(&output, quality), &settings, &outputs)
         }
     }
 }
@@ -167,12 +179,19 @@ fn info(files: &[PathBuf]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn convert(input: &Path, output: &Path) -> anyhow::Result<()> {
+/// Results are JPEGs if `output` has a JPEG extension, Linear DNGs otherwise.
+fn result_format(output: &Path, quality: u8) -> ResultFormat {
+    if io::is_jpeg_file(output) { ResultFormat::Jpeg { quality } } else { ResultFormat::Dng }
+}
+
+const SOFTWARE: &str = concat!("Shroom Stack ", env!("CARGO_PKG_VERSION"));
+
+fn convert(input: &Path, output: &Path, format: ResultFormat) -> anyhow::Result<()> {
     let t = Instant::now();
     let frame = io::load_linear(input).with_context(|| format!("loading {}", input.display()))?;
     eprintln!("decoded + demosaiced in {:.2?}", t.elapsed());
     let t = Instant::now();
-    io::write_linear_dng(output, &frame.image, &frame.template, concat!("Shroom Stack ", env!("CARGO_PKG_VERSION")))?;
+    format.write(output, &frame.image, &frame.template, SOFTWARE)?;
     eprintln!("written in {:.2?}", t.elapsed());
     Ok(())
 }
@@ -184,7 +203,13 @@ struct Outputs<'a> {
     bokeh_mask: Option<&'a Path>,
 }
 
-fn stack_files(files: &[PathBuf], output: &Path, settings: &StackSettings, outputs: &Outputs) -> anyhow::Result<()> {
+fn stack_files(
+    files: &[PathBuf],
+    output: &Path,
+    format: ResultFormat,
+    settings: &StackSettings,
+    outputs: &Outputs,
+) -> anyhow::Result<()> {
     let mut frames: Vec<FrameInfo> = files.iter().map(|p| io::read_frame_info(p)).collect::<Result<_, _>>()?;
     io::sort_frames(&mut frames);
     let paths: Vec<PathBuf> = frames.into_iter().map(|f| f.path).collect();
@@ -215,7 +240,7 @@ fn stack_files(files: &[PathBuf], output: &Path, settings: &StackSettings, outpu
 
     let first = io::load_linear(&paths[0])?;
     let template = first.template.with_sources(&paths).with_settings(settings);
-    io::write_linear_dng(output, &result.image, &template, concat!("Shroom Stack ", env!("CARGO_PKG_VERSION")))?;
+    format.write(output, &result.image, &template, SOFTWARE)?;
     if let Some(path) = outputs.preview {
         save_jpeg(&render_display(&result.image, &first.color, Some(2048)), path)?;
     }

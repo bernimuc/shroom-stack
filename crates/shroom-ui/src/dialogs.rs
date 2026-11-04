@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use eframe::egui;
+use shroom_core::io::ResultFormat;
 
 pub enum Picked {
     /// Files to add (empty if the dialog was cancelled).
@@ -37,10 +38,10 @@ impl Dialogs {
         self.open
     }
 
-    pub fn pick_raw_files(&mut self) {
+    pub fn pick_input_files(&mut self) {
         self.spawn(|| async {
             let files = rfd::AsyncFileDialog::new()
-                .add_filter("Raw images", shroom_core::io::RAW_EXTENSIONS)
+                .add_filter("Raw images and JPEGs", shroom_core::io::INPUT_EXTENSIONS)
                 .pick_files()
                 .await;
             Picked::Open(files.unwrap_or_default().iter().map(|f| f.path().to_path_buf()).collect())
@@ -53,9 +54,14 @@ impl Dialogs {
         });
     }
 
-    pub fn save_dng(&mut self, file_name: String, directory: Option<PathBuf>) {
+    /// Asks where to save a result in `format`.
+    pub fn save_result(&mut self, format: ResultFormat, file_name: String, directory: Option<PathBuf>) {
         self.spawn(move || async move {
-            let mut dialog = rfd::AsyncFileDialog::new().add_filter("DNG", &["dng"]).set_file_name(file_name);
+            let filter: (&str, &[&str]) = match format {
+                ResultFormat::Dng => ("DNG", &["dng"]),
+                ResultFormat::Jpeg { .. } => ("JPEG", &["jpg", "jpeg"]),
+            };
+            let mut dialog = rfd::AsyncFileDialog::new().add_filter(filter.0, filter.1).set_file_name(file_name);
             if let Some(dir) = directory {
                 dialog = dialog.set_directory(dir);
             }

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 
 use eframe::egui;
-use shroom_core::io;
+use shroom_core::io::{self, ResultFormat};
 use shroom_core::stack::{CancelToken, FileFrames, Progress, StackSettings};
 
 pub enum BatchEvent {
@@ -23,8 +23,8 @@ pub struct Batch {
 }
 
 impl Batch {
-    /// Stacks each list of frames in turn.
-    pub fn start(ctx: egui::Context, stacks: Vec<Vec<PathBuf>>, settings: StackSettings) -> Self {
+    /// Stacks each list of frames in turn, saving results in `format`.
+    pub fn start(ctx: egui::Context, stacks: Vec<Vec<PathBuf>>, settings: StackSettings, format: ResultFormat) -> Self {
         let (tx, rx) = channel();
         let cancel = CancelToken::default();
         let token = cancel.clone();
@@ -41,9 +41,9 @@ impl Batch {
                 let source = FileFrames { paths: paths.clone() };
                 let result = shroom_core::stack::stack(&source, &settings, &progress, &token).and_then(|result| {
                     let template = io::read_template(&paths[0])?.with_sources(&paths).with_settings(&settings);
-                    let path = result_path(&paths[0]);
+                    let path = result_path(&paths[0], format);
                     let software = concat!("Shroom Stack ", env!("CARGO_PKG_VERSION"));
-                    io::write_linear_dng(&path, &result.image, &template, software)?;
+                    format.write(&path, &result.image, &template, software)?;
                     Ok(path)
                 });
                 match result {
@@ -69,12 +69,14 @@ impl Batch {
     }
 }
 
-/// `<first frame>-stacked.dng` next to the first frame, numbered if that file exists.
-pub fn result_path(first: &Path) -> PathBuf {
+/// `<first frame>-stacked.dng` (or `.jpg`) next to the first frame, numbered if that file
+/// exists.
+pub fn result_path(first: &Path, format: ResultFormat) -> PathBuf {
     let stem = first.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let dir = first.parent().unwrap_or(Path::new(""));
+    let ext = format.extension();
     (1..)
-        .map(|n| dir.join(if n == 1 { format!("{stem}-stacked.dng") } else { format!("{stem}-stacked-{n}.dng") }))
+        .map(|n| dir.join(if n == 1 { format!("{stem}-stacked.{ext}") } else { format!("{stem}-stacked-{n}.{ext}") }))
         .find(|p| !p.exists())
         .expect("a free name")
 }
@@ -87,8 +89,10 @@ mod tests {
     fn result_names_never_overwrite() {
         let dir = tempfile::tempdir().unwrap();
         let first = dir.path().join("1Z4A4075.CR3");
-        assert_eq!(result_path(&first), dir.path().join("1Z4A4075-stacked.dng"));
+        assert_eq!(result_path(&first, ResultFormat::Dng), dir.path().join("1Z4A4075-stacked.dng"));
         std::fs::write(dir.path().join("1Z4A4075-stacked.dng"), b"").unwrap();
-        assert_eq!(result_path(&first), dir.path().join("1Z4A4075-stacked-2.dng"));
+        assert_eq!(result_path(&first, ResultFormat::Dng), dir.path().join("1Z4A4075-stacked-2.dng"));
+        let jpeg = ResultFormat::Jpeg { quality: 90 };
+        assert_eq!(result_path(&first, jpeg), dir.path().join("1Z4A4075-stacked.jpg"));
     }
 }

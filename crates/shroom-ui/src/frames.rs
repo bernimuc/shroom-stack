@@ -20,11 +20,13 @@ impl Frame {
     }
 }
 
-use shroom_core::io::is_raw_file;
+use shroom_core::io::{is_input_file, is_jpeg_file, is_raw_file};
 
-/// Expands folders (one level) and keeps raw files (DNG, CR3, …); returns them and the
-/// number of files skipped because they are not in a supported format.
-pub fn collect_raw_files(paths: impl IntoIterator<Item = PathBuf>) -> (Vec<PathBuf>, usize) {
+/// Expands folders (one level) and keeps raw files (DNG, CR3, …) and JPEGs; returns them
+/// and the number of files skipped because they are not in a supported format. In
+/// folders, JPEGs the camera saved next to a raw file of the same name (RAW+JPEG) are
+/// left out silently, so each shot appears once.
+pub fn collect_input_files(paths: impl IntoIterator<Item = PathBuf>) -> (Vec<PathBuf>, usize) {
     let (mut found, mut skipped) = (Vec::new(), 0);
     for path in paths {
         if path.is_dir() {
@@ -32,14 +34,19 @@ pub fn collect_raw_files(paths: impl IntoIterator<Item = PathBuf>) -> (Vec<PathB
                 .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_file()).collect())
                 .unwrap_or_default();
             entries.sort();
+            let raw_stems: std::collections::HashSet<_> =
+                entries.iter().filter(|p| is_raw_file(p)).filter_map(|p| p.file_stem().map(|s| s.to_owned())).collect();
             for entry in entries {
-                if is_raw_file(&entry) {
+                if is_jpeg_file(&entry) && entry.file_stem().is_some_and(|s| raw_stems.contains(s)) {
+                    continue;
+                }
+                if is_input_file(&entry) {
                     found.push(entry);
                 } else if !entry.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
                     skipped += 1;
                 }
             }
-        } else if is_raw_file(&path) {
+        } else if is_input_file(&path) {
             found.push(path);
         } else {
             skipped += 1;
@@ -182,7 +189,12 @@ pub fn preflight(list: &FrameList, memory: Option<u64>) -> Vec<Issue> {
         if infos.iter().any(|(_, i)| i.camera != first.camera) {
             issues.push(Issue::warning("The images come from different cameras."));
         }
-        let extension = |f: &Frame| f.path.extension().map(|e| e.to_string_lossy().to_lowercase());
+        let extension = |f: &Frame| {
+            if is_jpeg_file(&f.path) {
+                return Some("jpg".to_string());
+            }
+            f.path.extension().map(|e| e.to_string_lossy().to_lowercase())
+        };
         if list.frames.iter().any(|f| extension(f) != extension(&list.frames[0])) {
             issues.push(Issue::error("The images have different file formats; a stack must use one format."));
         }
@@ -202,7 +214,7 @@ pub fn preflight(list: &FrameList, memory: Option<u64>) -> Vec<Issue> {
         let mut needed = estimated_memory(first.width, first.height);
         // Slow-to-decode formats (e.g. CR3) keep decoded frames in memory: 2 bytes per
         // photosite, at most a quarter of the installed memory.
-        if list.frames.iter().any(|f| !f.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dng"))) {
+        if list.frames.iter().any(|f| shroom_core::io::is_slow_to_decode(&f.path)) {
             let cache = 2 * (first.width * first.height * infos.len()) as u64;
             needed += cache.min(memory.unwrap_or(u64::MAX) / 4);
         }
@@ -249,6 +261,7 @@ mod tests {
             orientation: Default::default(),
             camera_values_known: true,
             mosaic: true,
+            jpeg: false,
             sources: Vec::new(),
             settings: None,
             unsupported: None,
@@ -279,16 +292,25 @@ mod tests {
     }
 
     #[test]
-    fn collects_raw_files_from_files_and_folders() {
+    fn collects_input_files_from_files_and_folders() {
         let dir = tempfile::tempdir().unwrap();
-        for name in ["b.DNG", "a.dng", "c.CR3", "notes.txt", ".DS_Store"] {
+        for name in ["b.DNG", "a.dng", "c.CR3", "d.JPG", "c.jpg", "notes.txt", ".DS_Store"] {
             std::fs::write(dir.path().join(name), b"").unwrap();
         }
         let (found, skipped) =
-            collect_raw_files([dir.path().to_path_buf(), PathBuf::from("x.dng"), PathBuf::from("y.jpg")]);
+            collect_input_files([dir.path().to_path_buf(), PathBuf::from("x.dng"), PathBuf::from("y.png")]);
         let names: Vec<_> = found.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
-        assert_eq!(names, ["a.dng", "b.DNG", "c.CR3", "x.dng"]);
-        assert_eq!(skipped, 2, "notes.txt and y.jpg; hidden files are ignored silently");
+        // c.jpg is the camera's JPEG of c.CR3.
+        assert_eq!(names, ["a.dng", "b.DNG", "c.CR3", "d.JPG", "x.dng"]);
+        assert_eq!(skipped, 2, "notes.txt and y.png; hidden files are ignored silently");
+    }
+
+    #[test]
+    fn jpeg_spellings_are_one_format() {
+        let l = list(&[("a.jpg", "2026-01-01 10:00:01", 10, "C"), ("b.JPEG", "2026-01-01 10:00:02", 10, "C")]);
+        assert!(preflight(&l, None).is_empty(), "{:?}", preflight(&l, None));
+        let l = list(&[("a.jpg", "2026-01-01 10:00:01", 10, "C"), ("b.dng", "2026-01-01 10:00:02", 10, "C")]);
+        assert!(preflight(&l, None).iter().any(|i| i.severity == Severity::Error && i.message.contains("formats")));
     }
 
     #[test]

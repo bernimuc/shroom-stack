@@ -124,7 +124,7 @@ pub struct SessionView {
     /// Files whose information is still being read.
     pending: HashSet<PathBuf>,
     photos: HashMap<PathBuf, Photo>,
-    /// Linear DNGs (stacking results) in the folder.
+    /// Stacking results (Linear DNGs, JPEGs recording their sources) in the folder.
     results: HashMap<PathBuf, ResultPhoto>,
     /// Results saved during this session whose information is still being read.
     pending_results: HashSet<PathBuf>,
@@ -153,12 +153,12 @@ pub struct SessionView {
 }
 
 impl SessionView {
-    /// Starts reading the raw files of `folder`; grouping follows once all are read.
+    /// Starts reading the raw files and JPEGs of `folder`; grouping follows once all are read.
     pub fn open(&mut self, folder: PathBuf, loader: &Loader) {
         if self.batch.is_some() || self.conversion.is_some() {
             return;
         }
-        let (files, _) = crate::frames::collect_raw_files([folder.clone()]);
+        let (files, _) = crate::frames::collect_input_files([folder.clone()]);
         let (file, message) = match SessionFile::load(&folder) {
             Ok(file) => (file, None),
             Err(e) => (None, Some((true, format!("Session file ignored: {e}")))),
@@ -172,7 +172,7 @@ impl SessionView {
             ..Default::default()
         };
         if files.is_empty() {
-            self.message = Some((true, "No raw files in this folder.".into()));
+            self.message = Some((true, "No raw files or JPEGs in this folder.".into()));
         }
         loader.request_infos(files);
     }
@@ -311,7 +311,7 @@ impl SessionView {
             return;
         }
         match result {
-            Ok(info) if !info.mosaic => {
+            Ok(info) if info.is_result() => {
                 self.results.insert(path.to_path_buf(), result_photo(info));
             }
             Ok(info) => {
@@ -519,7 +519,7 @@ impl SessionView {
         stack.included().iter().find_map(|p| self.photos.get(p)?.unsupported.as_deref())
     }
 
-    pub fn start_batch(&mut self, ctx: &egui::Context, settings: StackSettings) {
+    pub fn start_batch(&mut self, ctx: &egui::Context, settings: StackSettings, format: shroom_core::io::ResultFormat) {
         let stacks: Vec<usize> = (0..self.stacks.len())
             .filter(|&i| {
                 let s = &self.stacks[i];
@@ -531,7 +531,7 @@ impl SessionView {
         }
         self.status = stacks.iter().map(|&i| (i, Status::Queued)).collect();
         let frames = stacks.iter().map(|&i| self.stacks[i].included()).collect();
-        let batch = Batch::start(ctx.clone(), frames, settings);
+        let batch = Batch::start(ctx.clone(), frames, settings, format);
         self.batch = Some(RunningBatch { batch, stacks, settings, finished: 0, current: 0.0 });
         self.message = None;
     }
