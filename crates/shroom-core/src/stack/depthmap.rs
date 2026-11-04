@@ -29,11 +29,14 @@ pub(super) fn stack<B: Backend>(
     let n = ctx.source.len();
     let mut analysis = bokeh.map(|_| bokeh::Analysis::new());
 
-    // Pass 1: arg-max of the focus measure (best, sum, depth), plus the first frame's
-    // brightness for noise normalisation.
+    // Pass 1: arg-max of the focus measure (best, sum, depth), plus the highest local
+    // brightness of any frame for noise normalisation.
     let mut state: Option<[B::Plane; 4]> = None;
     ctx.for_each_frame(Stage::Analysing, 0..n, |i, frame| {
-        let focus = focus_measure(b, &frame, radius);
+        let lum = b.luminance(&frame);
+        let focus = focus_measure(b, &lum, radius);
+        let bright = box_blur(b, &lum, radius);
+        drop(lum);
         if let Some(a) = &mut analysis {
             a.add(b, &frame);
         }
@@ -42,10 +45,12 @@ pub(super) fn stack<B: Backend>(
                 let (w, h) = b.rgb_size(&frame);
                 let mut sum = b.zeros_plane(w, h);
                 b.add_assign(&mut sum, &focus);
-                let brightness = box_blur(b, &b.luminance(&frame), radius);
-                state = Some([focus, sum, b.zeros_plane(w, h), brightness]);
+                state = Some([focus, sum, b.zeros_plane(w, h), bright]);
             }
-            Some([best, sum, depth, _]) => b.argmax_update(best, sum, depth, &focus, i),
+            Some([best, sum, depth, brightness]) => {
+                b.argmax_update(best, sum, depth, &focus, i);
+                b.max_assign(brightness, &bright);
+            }
         }
         let depth = state.as_ref().map(|[_, _, depth, _]| depth);
         ctx.snapshot(Stage::Analysing, i, &frame, depth, i + 1 == n);
@@ -96,6 +101,16 @@ const FILL_STRENGTH: f64 = 0.05;
 /// from the mean focus, in amplitude units (sqrt of energy, so a few very high-contrast
 /// edges don't dominate) and normalised by the shot-noise level of the local brightness,
 /// minus a noise floor.
+///
+/// `brightness` is the highest local brightness of any frame. Next to a bright object
+/// that is out of focus in all frames, its blur spills light into the dark surroundings,
+/// the more the more defocused the frame; the gentle curvature of that spill makes the
+/// most defocused frame "win" there, with a contrast that is small but – measured
+/// against the dark sharp frames – above the noise floor. With nothing confident nearby,
+/// the smoothing would spread that frame's bloated, blurry outline over the whole area.
+/// Measured against the brightness of the spill instead, such pixels fall below the
+/// noise floor, while genuinely sharp detail (whose frame is usually the darkest there
+/// anyway) keeps its confidence.
 fn confidence(best: &Plane, sum: &Plane, brightness: &Plane, n: usize) -> Plane {
     let mut conf = Plane::from_vec(
         best.width(),
@@ -123,9 +138,9 @@ fn confidence(best: &Plane, sum: &Plane, brightness: &Plane, n: usize) -> Plane 
 /// at this slightly coarser scale reflects real focus.
 const FOCUS_SIGMA: f32 = 1.5;
 
-/// Local energy of the Laplacian of Gaussian of the frame's luminance.
-fn focus_measure<B: Backend>(b: &B, frame: &B::Rgb, radius: usize) -> B::Plane {
-    let lap = b.laplacian(&gaussian_blur(b, &b.luminance(frame), FOCUS_SIGMA), true);
+/// Local energy of the Laplacian of Gaussian of a frame's luminance.
+fn focus_measure<B: Backend>(b: &B, lum: &B::Plane, radius: usize) -> B::Plane {
+    let lap = b.laplacian(&gaussian_blur(b, lum, FOCUS_SIGMA), true);
     box_blur(b, &lap, radius)
 }
 
@@ -227,7 +242,8 @@ mod tests {
     #[test]
     fn sharper_frame_has_higher_focus() {
         let (_, frames) = crate::stack::tests::banded_stack(64, 32, 2);
-        let (f0, f1) = (focus_measure(&Cpu, &frames.0[0], 4), focus_measure(&Cpu, &frames.0[1], 4));
+        let focus = |i: usize| focus_measure(&Cpu, &Cpu.luminance(&frames.0[i]), 4);
+        let (f0, f1) = (focus(0), focus(1));
         assert!(f0.get(10, 16) > 10.0 * f1.get(10, 16));
         assert!(f1.get(54, 16) > 10.0 * f0.get(54, 16));
     }

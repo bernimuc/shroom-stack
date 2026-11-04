@@ -46,6 +46,8 @@ pub(crate) trait Backend: Sync {
 
     fn sub(&self, a: &Self::Plane, b: &Self::Plane) -> Self::Plane;
     fn add_assign(&self, a: &mut Self::Plane, b: &Self::Plane);
+    /// `a = max(a, b)` element-wise.
+    fn max_assign(&self, a: &mut Self::Plane, b: &Self::Plane);
     fn scale(&self, a: &mut Self::Plane, f: f32);
     fn clamp_min_rgb(&self, a: &mut Self::Rgb, min: f32);
     /// `a = ln(a + offset)` per sample.

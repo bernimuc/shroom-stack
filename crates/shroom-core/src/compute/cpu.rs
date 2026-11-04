@@ -84,6 +84,9 @@ impl Backend for Cpu {
     fn add_assign(&self, a: &mut Plane, b: &Plane) {
         zip_mut(a, b, |a, b| *a += b);
     }
+    fn max_assign(&self, a: &mut Plane, b: &Plane) {
+        zip_mut(a, b, |a, b| *a = a.max(b));
+    }
     fn scale(&self, a: &mut Plane, f: f32) {
         a.data_mut().par_iter_mut().for_each(|v| *v *= f);
     }

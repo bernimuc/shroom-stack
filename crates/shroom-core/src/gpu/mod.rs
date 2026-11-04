@@ -210,6 +210,10 @@ impl Backend for Gpu {
     fn add_assign(&self, a: &mut GpuPlane, b: &GpuPlane) {
         self.run(kernel!("accumulate"), params(a.w, a.h), &[&a.buf, &b.buf], a.w, a.h);
     }
+    fn max_assign(&self, a: &mut GpuPlane, b: &GpuPlane) {
+        let p = Params { i: [1, 0, 0, 0], ..params(a.w, a.h) };
+        self.run(kernel!("accumulate"), p, &[&a.buf, &b.buf], a.w, a.h);
+    }
     fn scale(&self, a: &mut GpuPlane, f: f32) {
         self.unary(&a.buf, a.w, a.h, 0, f);
     }
@@ -354,6 +358,9 @@ mod tests {
         g.scale(&mut ga, 0.5);
         Cpu.scale(&mut ca, 0.5);
         assert_close(&dp(&ga), ca.data(), 1e-6, "add/scale");
+        g.max_assign(&mut ga, &go);
+        Cpu.max_assign(&mut ca, &other);
+        assert_close(&dp(&ga), ca.data(), 1e-6, "max");
 
         let shifted = RgbImage::from_vec(w, h, img.data().iter().map(|v| v - 0.5).collect());
         let (mut gs, mut cs) = (g.upload_rgb(&shifted), shifted.clone());
