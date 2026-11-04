@@ -42,4 +42,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# The linker only signs the executable, which leaves the bundle's signature broken
+# (Info.plist and resources unsealed); a downloaded copy is then reported as
+# "damaged". Sign the whole bundle ad hoc (no Apple Developer ID needed).
+codesign --force --sign - "$APP"
+
 echo "Built $APP"
