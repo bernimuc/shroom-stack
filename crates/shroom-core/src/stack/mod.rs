@@ -71,6 +71,12 @@ pub trait FrameSource: Sync {
         false
     }
 
+    /// Whether the frames are rendered images (JPEGs) rather than linear sensor data: their
+    /// noise doesn't follow the shot-noise model of raw data (tone curve, sharpening).
+    fn display_referred(&self) -> bool {
+        false
+    }
+
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -102,6 +108,10 @@ impl FrameSource for FileFrames {
     /// DNGs and JPEGs decode quickly; camera formats like CR3 take several times as long.
     fn slow_to_decode(&self) -> bool {
         self.paths.iter().any(|p| crate::io::is_slow_to_decode(p))
+    }
+
+    fn display_referred(&self) -> bool {
+        self.paths.iter().any(|p| crate::io::is_jpeg_file(p))
     }
 }
 
@@ -202,6 +212,10 @@ impl FrameSource for CachedFrames<'_> {
 
     fn slow_to_decode(&self) -> bool {
         self.inner.slow_to_decode()
+    }
+
+    fn display_referred(&self) -> bool {
+        self.inner.display_referred()
     }
 }
 

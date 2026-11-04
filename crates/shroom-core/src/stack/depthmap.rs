@@ -59,7 +59,9 @@ pub(super) fn stack<B: Backend>(
     let [best, sum, depth, brightness] = state.expect("at least two frames");
     let size = b.plane_size(&best);
 
-    let confidence = confidence(&b.download_plane(&best), &b.download_plane(&sum), &b.download_plane(&brightness), n);
+    let floor = if ctx.source.display_referred() { NoiseFloor::PerBrightness } else { NoiseFloor::Global };
+    let confidence =
+        confidence(&b.download_plane(&best), &b.download_plane(&sum), &b.download_plane(&brightness), n, floor);
     drop((best, sum, brightness));
     let (sigma, self_weight) = smoothing_params(radius, smoothing);
     let blur = |p: &Plane, sigma: f32| b.download_plane(&gaussian_blur(b, &b.upload_plane(p), sigma));
@@ -97,6 +99,25 @@ const DARK_NOISE: f32 = 1e-3;
 /// How strongly coarse-scale estimates fill in, relative to the mean confidence.
 const FILL_STRENGTH: f64 = 0.05;
 
+/// How the noise floor of the confidence is estimated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoiseFloor {
+    /// One floor for the whole image: after normalising by the shot-noise level, noise
+    /// of linear raw data is about the same at every brightness.
+    Global,
+    /// A floor per brightness, measured in the image, never below the global one. Noise
+    /// of rendered images (JPEGs) grows much faster with brightness than shot noise –
+    /// tone curve, sharpening and 8-bit coding (3× from shadows to highlights in a
+    /// Lightroom export) – so with one floor, smooth bright bokeh lies above it and turns
+    /// into a patchwork of frames.
+    PerBrightness,
+}
+
+/// Brightness bins of [`NoiseFloor::PerBrightness`]: one stop wide, from this level up.
+const FLOOR_BIN_MIN: f32 = 1.0 / 1024.0;
+/// Fewest samples for a bin's own floor; sparser bins take their neighbours'.
+const FLOOR_BIN_SAMPLES: usize = 2000;
+
 /// Per-pixel confidence of the depth estimate: how much the best frame's focus stands out
 /// from the mean focus, in amplitude units (sqrt of energy, so a few very high-contrast
 /// edges don't dominate) and normalised by the shot-noise level of the local brightness,
@@ -111,7 +132,7 @@ const FILL_STRENGTH: f64 = 0.05;
 /// Measured against the brightness of the spill instead, such pixels fall below the
 /// noise floor, while genuinely sharp detail (whose frame is usually the darkest there
 /// anyway) keeps its confidence.
-fn confidence(best: &Plane, sum: &Plane, brightness: &Plane, n: usize) -> Plane {
+fn confidence(best: &Plane, sum: &Plane, brightness: &Plane, n: usize, floor: NoiseFloor) -> Plane {
     let mut conf = Plane::from_vec(
         best.width(),
         best.height(),
@@ -128,9 +149,67 @@ fn confidence(best: &Plane, sum: &Plane, brightness: &Plane, n: usize) -> Plane 
             })
             .collect(),
     );
-    let floor = NOISE_FLOOR_FACTOR * percentile(&conf, 0.1);
-    conf.data_mut().par_iter_mut().for_each(|c| *c = (*c - floor).max(0.0));
+    let global = NOISE_FLOOR_FACTOR * percentile(&conf, 0.1);
+    match floor {
+        NoiseFloor::Global => conf.data_mut().par_iter_mut().for_each(|c| *c = (*c - global).max(0.0)),
+        NoiseFloor::PerBrightness => {
+            let floors = brightness_floors(&conf, brightness, global);
+            conf.data_mut()
+                .par_iter_mut()
+                .zip(brightness.data().par_iter())
+                .for_each(|(c, l)| *c = (*c - floors.at(*l)).max(0.0));
+        }
+    }
     conf
+}
+
+/// Noise floors per brightness bin, interpolated in between.
+struct BrightnessFloors {
+    /// Floor at the centre of each bin (`log2` of brightness `FLOOR_BIN_MIN · 2^(i + 0.5)`).
+    bins: Vec<f32>,
+}
+
+impl BrightnessFloors {
+    fn at(&self, brightness: f32) -> f32 {
+        let pos = (brightness.max(FLOOR_BIN_MIN) / FLOOR_BIN_MIN).log2() - 0.5;
+        let last = self.bins.len() - 1;
+        let i = (pos.max(0.0).floor() as usize).min(last);
+        let t = (pos - i as f32).clamp(0.0, 1.0);
+        self.bins[i] * (1.0 - t) + self.bins[(i + 1).min(last)] * t
+    }
+}
+
+/// [`NOISE_FLOOR_FACTOR`] times the 10th percentile of `conf` per brightness bin, at least
+/// `global`. Clipped pixels (confidence 0 by definition) are left out.
+fn brightness_floors(conf: &Plane, brightness: &Plane, global: f32) -> BrightnessFloors {
+    let count = ((CLIP_LEVEL / FLOOR_BIN_MIN).log2().ceil() as usize).max(1);
+    let bin = |l: f32| ((l.max(FLOOR_BIN_MIN) / FLOOR_BIN_MIN).log2() as usize).min(count - 1);
+    let step = (conf.data().len() / 1_000_000).max(1);
+    let mut samples = vec![Vec::new(); count];
+    for (c, l) in conf.data().iter().zip(brightness.data()).step_by(step) {
+        if *l <= CLIP_LEVEL {
+            samples[bin(*l)].push(*c);
+        }
+    }
+    let own: Vec<Option<f32>> = samples
+        .into_iter()
+        .map(|mut v| {
+            (v.len() >= FLOOR_BIN_SAMPLES).then(|| {
+                v.sort_by(f32::total_cmp);
+                (NOISE_FLOOR_FACTOR * v[v.len() / 10]).max(global)
+            })
+        })
+        .collect();
+    // Sparse bins take the floor of the nearest bin with enough samples.
+    let bins = (0..count)
+        .map(|i| {
+            (0..count)
+                .filter_map(|j| own[j].map(|f| (i.abs_diff(j), f)))
+                .min_by_key(|&(d, _)| d)
+                .map_or(global, |(_, f)| f)
+        })
+        .collect();
+    BrightnessFloors { bins }
 }
 
 /// Scale of the focus measure. A plain pixel-level Laplacian mostly measures sensor
@@ -282,10 +361,61 @@ mod tests {
                 best.set(x, y, 1.0);
             }
         }
-        let c = confidence(&best, &sum, &bright, 4);
-        assert!(c.get(10, 5) > 0.0);
-        assert_eq!(c.get(70, 5), 0.0);
-        assert_eq!(c.get(97, 5), 0.0);
+        for floor in [NoiseFloor::Global, NoiseFloor::PerBrightness] {
+            let c = confidence(&best, &sum, &bright, 4, floor);
+            assert!(c.get(10, 5) > 0.0);
+            assert_eq!(c.get(70, 5), 0.0);
+            assert_eq!(c.get(97, 5), 0.0);
+        }
+    }
+
+    /// Smooth areas whose noise grows faster with brightness than shot noise (as in
+    /// rendered JPEGs), next to a sharp detail: with one global floor the bright smooth
+    /// area counts as confident; per brightness it doesn't, while the detail does.
+    #[test]
+    fn per_brightness_floor_follows_noise_of_rendered_images() {
+        let (w, h) = (400, 100);
+        let n = 10;
+        let mean = 1e-4f32;
+        // Left half dark (0.01), right half bright (0.2); noise contrast in amplitude units
+        // ∝ brightness^0.8 instead of ^0.5, varying per pixel.
+        let bright = Plane::from_vec(w, h, (0..w * h).map(|i| if i % w < w / 2 { 0.01 } else { 0.2 }).collect());
+        let noise = |i: usize| 1.0 + 3.0 * ((i * 7919 % 101) as f32 / 100.0);
+        let best = Plane::from_vec(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| {
+                    let l: f32 = if i % w < w / 2 { 0.01 } else { 0.2 };
+                    let contrast = 0.02 * l.powf(0.8) * noise(i);
+                    // A sharp detail in the bright half.
+                    let contrast = if (i % w) / 10 == 30 && (i / w) / 10 == 5 { 0.5 * l.sqrt() } else { contrast };
+                    (mean.sqrt() + contrast).powi(2)
+                })
+                .collect(),
+        );
+        let sum = Plane::from_vec(w, h, vec![mean * n as f32; w * h]);
+        let bright_smooth = (350, 20);
+        let global = confidence(&best, &sum, &bright, n, NoiseFloor::Global);
+        assert!(global.get(bright_smooth.0, bright_smooth.1) > 0.0, "the global floor lets bright noise through");
+        let adaptive = confidence(&best, &sum, &bright, n, NoiseFloor::PerBrightness);
+        let bright_noise = (w / 2..w).filter(|&x| adaptive.get(x, 20) > 0.0).count();
+        assert!(bright_noise < 20, "{bright_noise} noisy bright pixels stay confident");
+        assert!(adaptive.get(305, 55) > 0.0, "the detail stays confident");
+    }
+
+    #[test]
+    fn brightness_floors_interpolate_and_never_drop_below_global() {
+        let floors = BrightnessFloors { bins: vec![1.0, 3.0, 5.0] };
+        let centre = |i: f32| FLOOR_BIN_MIN * 2f32.powf(i + 0.5);
+        assert_eq!(floors.at(0.0), 1.0);
+        assert!((floors.at(centre(0.0)) - 1.0).abs() < 1e-5);
+        assert!((floors.at(centre(0.5)) - 2.0).abs() < 1e-4);
+        assert_eq!(floors.at(10.0), 5.0);
+        // Too few samples anywhere: the global floor.
+        let tiny = Plane::from_vec(4, 4, vec![0.0; 16]);
+        let f = brightness_floors(&tiny, &Plane::from_vec(4, 4, vec![0.1; 16]), 0.5);
+        assert!(f.bins.iter().all(|&v| v == 0.5));
     }
 
     #[test]
